@@ -15,30 +15,37 @@ MAX_STEP_RETRIES = 3
 def _classify_step(step_text: str, llm_client) -> str:
     """
     Send a single step description to the LLM to classify it.
-    Returns one of: CMD, CODE, TEST
+    Returns one of: CMD, CODE, TEST, IGNORE
     """
     prompt = (
         "Classify the following task step into exactly one category.\n"
-        "Reply with ONLY one word: CMD, CODE, or TEST\n"
-        "  CMD  = run a shell command (check env, install, create dir)\n"
-        "  CODE = create or modify source code files\n"
-        "  TEST = write or run unit tests\n\n"
+        "Reply with ONLY one word: CMD, CODE, TEST, or IGNORE\n"
+        "  CMD    = run a specific shell command (must contain an actual command)\n"
+        "  CODE   = create or modify source code files\n"
+        "  TEST   = write or run unit tests\n"
+        "  IGNORE = not actionable by a program (e.g. open a text editor,\n"
+        "           open an IDE, save a file , review code visually,\n"
+        "           set up environment , navigate directories)\n\n"
         f"Step: {step_text}\n\n"
         "Category:"
     )
     response = llm_client.generate_response(prompt).strip().upper()
     # Extract just the keyword from the response
-    for keyword in ("CMD", "CODE", "TEST"):
+    for keyword in ("IGNORE", "CMD", "CODE", "TEST"):
         if keyword in response:
             return keyword
     return "CODE"  # default fallback
 
 
 def _handle_cmd_step(step_text: str, executor: Executor) -> bool:
-    """Extract and run a shell command from the step description."""
+    """Extract and run a shell command from the step description.
+    Only runs if a command is specified in backticks, otherwise skips."""
     match = re.search(r"`([^`]+)`", step_text)
-    cmd = match.group(1) if match else step_text
+    if not match:
+        print(f"  [SKIP] No executable command found in backticks.")
+        return True
 
+    cmd = match.group(1)
     print(f"  Running: {cmd}")
     success, output = executor.run_command(cmd)
     if output:
@@ -183,7 +190,10 @@ def main():
         step_type = _classify_step(step_text, llm_client)
         print(f"  Classified as: [{step_type}]\n")
 
-        if step_type == "CMD":
+        if step_type == "IGNORE":
+            print(f"  [SKIP] Not actionable, skipping.")
+
+        elif step_type == "CMD":
             _handle_cmd_step(step_text, executor)
 
         elif step_type == "CODE":
@@ -194,9 +204,7 @@ def main():
             _handle_test_step(step_text, tester, coder, executor,
                               args.task, accumulated_code)
         else:
-            print(f"  Unknown type '{step_type}', treating as CODE.")
-            _handle_code_step(step_text, coder, reviewer, executor,
-                              args.task, accumulated_code)
+            print(f"  Unknown type '{step_type}', skipping.")
 
     print(f"\n{'='*60}")
     print(f"  All steps processed.")

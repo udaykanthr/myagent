@@ -8,10 +8,17 @@ class TesterAgent(Agent):
 Generate unit tests using `pytest`.
 IMPORTANT: Use the exact file paths from the context to build correct import statements.
 For example if the source file is at `src/bubble_sort.py`, import it as `from src.bubble_sort import ...`.
-Format your response using:
-#### [FILE]: tests/test_[file_name].[ext]
-```[language]
+
+For EACH test file, use EXACTLY this marker format (no extra text after the path):
+
+#### [FILE]: tests/test_example.py
+```python
 # test code here
 ```
+
+Rules:
+- The path after [FILE]: must be ONLY the file path, nothing else.
+- Use forward slashes in paths.
+- Do NOT add descriptions, comments, or parentheses after the file path.
 """
         return self.llm_client.generate_response(prompt)

@@ -149,19 +149,31 @@ class CLIDisplay:
         sys.stdout.write("\033[2J\033[H")
         sys.stdout.flush()
 
-        # ── TOP: Title centered ──
+        # ── TOP: Big wild-west title in orange ──
+        ORANGE = "\033[38;5;208m"
+        RESET = "\033[0m"
+        banner = [
+            r"     _                    _      ____ _                 _   _ ",
+            r"    / \   __ _  ___ _ __ | |_   / ___| |__   __ _ _ __ | |_(_)",
+            r"   / _ \ / _` |/ _ \ '_ \| __| | |   | '_ \ / _` | '_ \| __| |",
+            r"  / ___ \ (_| |  __/ | | | |_  | |___| | | | (_| | | | | |_| |",
+            r" /_/   \_\__, |\___|_| |_|\__|  \____|_| |_|\__,_|_| |_|\__|_|",
+            r"         |___/                                                 ",
+            r"                    ━━  L o c a l   C o d e r  ━━              ",
+        ]
         self._move_to(1)
-        print("═" * w)
-        print(self._center("Agent Chanti - Local coder"))
+        print(f"{ORANGE}{'═' * w}{RESET}")
+        for line in banner:
+            print(f"{ORANGE}{self._center(line)}{RESET}")
+        print(f"{ORANGE}{'═' * w}{RESET}")
         print(self._center(f"Task: {self.task}"))
-        print("═" * w)
 
         # ── MIDDLE: Progress + Tokens centered ──
         step_lines = self._build_step_lines()
         steps_height = len(step_lines) + 2  # +2 for separator + padding
 
-        # Middle zone: between header (row 5) and steps section
-        middle_start = 5
+        # Middle zone: between header and steps section
+        middle_start = len(banner) + 4
         bottom_start = max(h - steps_height, middle_start + 6)
         mid_row = (middle_start + bottom_start) // 2 - 2
 

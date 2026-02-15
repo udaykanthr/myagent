@@ -1,4 +1,4 @@
-# Multi-Agent Coder Walkthrough
+# AgentChanti 
 
 I have successfully created a modular multi-agent coder program in Python. It is designed to work with local LLMs like Ollama and LM Studio.
 
@@ -9,10 +9,10 @@ I have successfully created a modular multi-agent coder program in Python. It is
 
 ## Setup
 
-1.  **Install Dependencies**
-    ```bash
-    pip install requests
-    ```
+1.  **Install Dependencies & CLI**
+    -   **Linux/Mac**: Run `./install.sh`
+    -   **Windows**: Run `install.bat`
+    -   Or manually: `pip install -e .`
 
 2.  **Configure LLM**
     -   **Ollama**: Ensure Ollama is running (`ollama serve`). The default URL is `http://localhost:11434/api/generate`.
@@ -20,14 +20,14 @@ I have successfully created a modular multi-agent coder program in Python. It is
 
 ## Usage
 
-Run the orchestrator script with your task:
+Run the agent from any directory:
 
 ```bash
 # Using Ollama (Default)
-python3 -m multi_agent_coder.orchestrator "Create a python script to scrape a website"
+agentchanti "Create a python script to scrape a website"
 
 # Using LM Studio
-python3 -m multi_agent_coder.orchestrator "Create a python script to scrape a website" --provider lm_studio
+agentchanti "Create a python script to scrape a website" --provider lm_studio
 ```
 
 ## Verification
@@ -45,3 +45,4 @@ The agents correctly pass data between each other:
 1.  **Planner** receives the task and produces a plan.
 2.  **Coder** receives the plan and produces code.
 3.  **Reviewer** receives the code and produces a review.
+ 

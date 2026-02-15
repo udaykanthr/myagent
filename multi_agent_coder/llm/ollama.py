@@ -1,6 +1,7 @@
 import requests
-import json
 from .base import LLMClient
+from ..cli_display import token_tracker, log
+
 
 class OllamaClient(LLMClient):
     def __init__(self, base_url: str, model: str):
@@ -8,9 +9,9 @@ class OllamaClient(LLMClient):
         self.model = model
 
     def generate_response(self, prompt: str) -> str:
-        # Estimate tokens sent (rough: ~1.3 tokens per word)
         est_tokens = int(len(prompt.split()) * 1.3)
-        print(f"  [LLM] Sending ~{est_tokens} tokens...")
+        log.debug(f"[Ollama] Sending ~{est_tokens} est. tokens")
+        log.debug(f"[Ollama] Prompt:\n{prompt}")
 
         payload = {
             "model": self.model,
@@ -23,12 +24,16 @@ class OllamaClient(LLMClient):
             data = response.json()
             result = data.get("response", "")
 
-            # Ollama returns token counts in the response
-            prompt_tokens = data.get("prompt_eval_count", "?")
-            completion_tokens = data.get("eval_count", "?")
-            print(f"  [LLM] Received: prompt_tokens={prompt_tokens}, completion_tokens={completion_tokens}")
+            prompt_tokens = data.get("prompt_eval_count", est_tokens)
+            completion_tokens = data.get("eval_count", 0)
+            token_tracker.record(
+                prompt_tokens if isinstance(prompt_tokens, int) else est_tokens,
+                completion_tokens if isinstance(completion_tokens, int) else 0
+            )
+            log.debug(f"[Ollama] Usage: prompt={prompt_tokens} completion={completion_tokens}")
+            log.debug(f"[Ollama] Response:\n{result}")
 
             return result
         except requests.exceptions.RequestException as e:
-            print(f"Error communicating with Ollama: {e}")
+            log.error(f"[Ollama] Connection error: {e}")
             return ""

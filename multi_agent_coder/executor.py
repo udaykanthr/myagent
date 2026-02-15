@@ -2,6 +2,7 @@ import os
 import re
 import subprocess
 from typing import Dict, List, Tuple
+from .cli_display import log
 
 
 class Executor:
@@ -56,7 +57,7 @@ class Executor:
                 os.makedirs(dirpath, exist_ok=True)
             with open(filepath, "w", encoding="utf-8") as f:
                 f.write(content)
-            print(f"  -> Written: {filepath}")
+            log.info(f"Written: {filepath}")
             written.append(filepath)
         return written
 

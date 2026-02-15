@@ -9,8 +9,8 @@ Generate unit tests using `pytest`.
 IMPORTANT: Use the exact file paths from the context to build correct import statements.
 For example if the source file is at `src/bubble_sort.py`, import it as `from src.bubble_sort import ...`.
 Format your response using:
-#### [FILE]: path/to/test_file.py
-```python
+#### [FILE]: tests/test_[file_name].[ext]
+```[language]
 # test code here
 ```
 """

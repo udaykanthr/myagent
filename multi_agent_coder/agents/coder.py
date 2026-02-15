@@ -6,8 +6,8 @@ class CoderAgent(Agent):
         prompt += """
 Please provide the implementation. 
 Format your response by specifying the filename for each file using the following format:
-#### [FILE]: path/to/file.py
-```python
+#### [FILE]: [path/to]/[filename].[ext] (make sure path and filename are correct and meaningful)
+```[language]
 # code here
 ```
 """

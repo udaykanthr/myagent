@@ -54,8 +54,8 @@ def _classify_step(step_text: str, llm_client) -> str:
         "Classify the following task step into exactly one category.\n"
         "Reply with ONLY one word: CMD, CODE, TEST, or IGNORE\n"
         "  CMD    = run a specific shell command (must contain an actual command)\n"
-        "  CODE   = create or modify source code files\n"
-        "  TEST   = write or run unit tests\n"
+        "  CODE   = create or modify source code files, make sure path and filename are correct and meaningful\n"
+        "  TEST   = write or run unit tests, make sure path and filename are correct and meaningful\n"
         "  IGNORE = not actionable by a program (e.g. open a text editor,\n"
         "           open an IDE, save a file, review code visually,\n"
         "           set up environment , navigate directories)\n\n"
@@ -224,7 +224,7 @@ def main():
 
     # Init agents
     planner = PlannerAgent("Planner", "Senior Software Architect",
-                           "Create a step-by-step plan for the coding task.", llm_client)
+                           "Create a step-by-step plan for the coding task and related testcases.", llm_client)
     coder = CoderAgent("Coder", "Senior Software Developer",
                        "Write clean Python code for a single step.", llm_client)
     reviewer = ReviewerAgent("Reviewer", "Code Reviewer",

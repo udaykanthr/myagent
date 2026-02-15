@@ -297,7 +297,7 @@ def main():
     log.info(f"Provider: {args.provider}, Model: {args.model}")
 
     # --- Step 1: Planning ---
-    display.render()
+    display.show_status("Requesting steps from planner...")
     log.info("Planning...")
 
     sent_before = token_tracker.total_prompt_tokens
@@ -306,6 +306,7 @@ def main():
     log.info(f"Plan:\n{plan}")
 
     # --- Step 2: Parse steps ---
+    display.show_status("Parsing steps...")
     steps = executor.parse_plan_steps(plan)
     if not steps:
         log.error("Could not parse any steps from the plan.")

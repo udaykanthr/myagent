@@ -66,6 +66,7 @@ class CLIDisplay:
         self.task = task_description
         self.steps: list[dict] = []
         self.current_step = -1
+        self.status_message = ""
         self._refresh_size()
 
     def _refresh_size(self):
@@ -177,19 +178,25 @@ class CLIDisplay:
         mid_row = (middle_start + bottom_start) // 2 - 2
 
         self._move_to(mid_row)
-        progress_text = f"Progress: {self._progress_bar()}"
-        print(self._center(progress_text))
-        print()
-        print(self._center(self._token_summary()))
 
-        # Step-level tokens for active step
-        if 0 <= self.current_step < len(self.steps):
-            step = self.steps[self.current_step]
-            if "tokens" in step:
-                t = step["tokens"]
-                step_tok = f"Step {self.current_step+1} tokens: ↑{t['sent']}  ↓{t['recv']}"
-                print()
-                print(self._center(step_tok))
+        if not self.steps and self.status_message:
+            # No steps yet — show planning status
+            YELLOW = "\033[33m"
+            print(self._center(f"{YELLOW}⏳  {self.status_message}{RESET}"))
+        else:
+            progress_text = f"Progress: {self._progress_bar()}"
+            print(self._center(progress_text))
+            print()
+            print(self._center(self._token_summary()))
+
+            # Step-level tokens for active step
+            if 0 <= self.current_step < len(self.steps):
+                step = self.steps[self.current_step]
+                if "tokens" in step:
+                    t = step["tokens"]
+                    step_tok = f"Step {self.current_step+1} tokens: ↑{t['sent']}  ↓{t['recv']}"
+                    print()
+                    print(self._center(step_tok))
 
         # ── BOTTOM: Steps list ──
         self._move_to(bottom_start)
@@ -198,6 +205,11 @@ class CLIDisplay:
             print(line)
 
         sys.stdout.flush()
+
+    def show_status(self, message: str):
+        """Show a status message in the center (before steps are loaded)."""
+        self.status_message = message
+        self.render()
 
     def start_step(self, index: int, step_type: str = "?"):
         self.current_step = index

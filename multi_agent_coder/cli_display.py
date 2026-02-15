@@ -66,7 +66,20 @@ class CLIDisplay:
         self.task = task_description
         self.steps: list[dict] = []
         self.current_step = -1
-        self.term_width = shutil.get_terminal_size((80, 24)).columns
+        self._refresh_size()
+
+    def _refresh_size(self):
+        size = shutil.get_terminal_size((80, 24))
+        self.term_width = size.columns
+        self.term_height = size.lines
+
+    def _center(self, text: str) -> str:
+        """Center text within terminal width."""
+        return text.center(self.term_width)
+
+    def _move_to(self, row: int):
+        """Move cursor to a specific row (1-indexed)."""
+        sys.stdout.write(f"\033[{row};1H")
 
     def set_steps(self, step_texts: list[str]):
         self.steps = [
@@ -92,44 +105,25 @@ class CLIDisplay:
             f"({t.call_count} calls)"
         )
 
-    def render(self):
-        """Redraw the full CLI display."""
-        # Clear screen
-        sys.stdout.write("\033[2J\033[H")
-        sys.stdout.flush()
-
-        # Header
-        print(f"{'═' * self.term_width}")
-        print(f"  Multi-Agent Coder")
-        print(f"  Task: {self.task}")
-        print(f"{'═' * self.term_width}")
-        print()
-
-        # Progress bar
-        print(f"  Progress: {self._progress_bar()}")
-        print(f"  {self._token_summary()}")
-        print(f"{'─' * self.term_width}")
-        print()
-
-        # Step list
+    def _build_step_lines(self) -> list[str]:
+        """Build the step list lines for bottom section."""
+        lines = []
         for i, step in enumerate(self.steps):
             icon = self.ICONS.get(step["status"], "?")
             type_tag = f"[{step['type']}]" if step["type"] != "?" else ""
-            prefix = "→ " if i == self.current_step else "  "
+            prefix = " → " if i == self.current_step else "   "
 
             if i == self.current_step:
-                # Active step — show full info
-                print(f"  {prefix}{icon} Step {i+1}: {step['text']}")
+                lines.append(f"{prefix}{icon} Step {i+1}: {step['text']}")
                 if type_tag:
-                    print(f"       Type: {type_tag}")
+                    lines.append(f"        Type: {type_tag}")
                 if "info" in step and step["info"]:
-                    for line in step["info"]:
-                        print(f"       {line}")
+                    for info_line in step["info"]:
+                        lines.append(f"        {info_line}")
                 if "tokens" in step:
                     t = step["tokens"]
-                    print(f"       Tokens: ↑{t['sent']} ↓{t['recv']}")
+                    lines.append(f"        Tokens: ↑{t['sent']} ↓{t['recv']}")
             else:
-                # Compact view for other steps
                 status_label = ""
                 if step["status"] == "done":
                     status_label = " ✔ done"
@@ -138,14 +132,60 @@ class CLIDisplay:
                 elif step["status"] == "skipped":
                     status_label = " – skipped"
 
-                line = f"  {prefix}{icon} Step {i+1}: {step['text'][:60]}"
+                line = f"{prefix}{icon} Step {i+1}: {step['text'][:55]}"
                 if type_tag:
                     line += f" {type_tag}"
                 line += status_label
-                print(line)
+                lines.append(line)
+        return lines
 
+    def render(self):
+        """Redraw the full CLI display with positioned sections."""
+        self._refresh_size()
+        w = self.term_width
+        h = self.term_height
+
+        # Clear screen
+        sys.stdout.write("\033[2J\033[H")
+        sys.stdout.flush()
+
+        # ── TOP: Title centered ──
+        self._move_to(1)
+        print("═" * w)
+        print(self._center("Agent Chanti - Local coder"))
+        print(self._center(f"Task: {self.task}"))
+        print("═" * w)
+
+        # ── MIDDLE: Progress + Tokens centered ──
+        step_lines = self._build_step_lines()
+        steps_height = len(step_lines) + 2  # +2 for separator + padding
+
+        # Middle zone: between header (row 5) and steps section
+        middle_start = 5
+        bottom_start = max(h - steps_height, middle_start + 6)
+        mid_row = (middle_start + bottom_start) // 2 - 2
+
+        self._move_to(mid_row)
+        progress_text = f"Progress: {self._progress_bar()}"
+        print(self._center(progress_text))
         print()
-        print(f"{'─' * self.term_width}")
+        print(self._center(self._token_summary()))
+
+        # Step-level tokens for active step
+        if 0 <= self.current_step < len(self.steps):
+            step = self.steps[self.current_step]
+            if "tokens" in step:
+                t = step["tokens"]
+                step_tok = f"Step {self.current_step+1} tokens: ↑{t['sent']}  ↓{t['recv']}"
+                print()
+                print(self._center(step_tok))
+
+        # ── BOTTOM: Steps list ──
+        self._move_to(bottom_start)
+        print("─" * w)
+        for line in step_lines:
+            print(line)
+
         sys.stdout.flush()
 
     def start_step(self, index: int, step_type: str = "?"):
@@ -160,7 +200,6 @@ class CLIDisplay:
         """Add a log line to the current step's display."""
         if 0 <= index < len(self.steps):
             info_list = self.steps[index].get("info", [])
-            # Keep only last 5 info lines on screen
             if len(info_list) >= 5:
                 info_list.pop(0)
             info_list.append(message)
@@ -182,9 +221,9 @@ class CLIDisplay:
         self.render()
 
     def finish(self, success: bool = True):
-        print()
+        self._move_to(self.term_height - 1)
         if success:
-            print("  ✔  All steps processed successfully!")
+            print(self._center("✔  All steps processed successfully!"))
         else:
-            print("  ✘  Some steps failed. Check logs for details.")
+            print(self._center("✘  Some steps failed. Check logs for details."))
         print()

@@ -14,8 +14,19 @@ class TesterAgent(Agent):
         prompt += f"""
 Generate unit tests for the provided code using `{fw['command']}`.
 Language: {lang_name}
-IMPORTANT: Use the exact file paths from the context to build correct import statements.
-For example if the source file is at `src/bubble_sort{test_ext}`, import it appropriately for {lang_name}.
+
+CRITICAL IMPORT RULE — read carefully:
+Convert the source file path to an import by replacing '/' with '.' and removing the file extension.
+NEVER drop directory prefixes. If the file is in a subdirectory, the import MUST include that directory.
+
+Examples:
+  File at `src/calculator.py`       → `from src.calculator import ...`
+  File at `src/utils/helpers.py`    → `from src.utils.helpers import ...`
+  File at `app/models/user.py`      → `from app.models.user import ...`
+  File at `calculator.py`           → `from calculator import ...`
+
+WRONG (do NOT do this):
+  File at `src/calculator.py`       → `from calculator import ...`   ← WRONG! Missing 'src.'
 
 For EACH test file, use EXACTLY this marker format (no extra text after the path):
 

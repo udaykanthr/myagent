@@ -30,7 +30,7 @@ class OllamaClient(LLMClient):
             "prompt": prompt,
             "stream": False,
         }
-        response = requests.post(self.base_url, json=payload)
+        response = requests.post(self.base_url, json=payload, timeout=(10, 300))
         response.raise_for_status()
         data = response.json()
         result = data.get("response", "")
@@ -60,7 +60,8 @@ class OllamaClient(LLMClient):
         tokens_generated = 0
         prompt_tokens = est_tokens
 
-        response = requests.post(self.base_url, json=payload, stream=True)
+        response = requests.post(self.base_url, json=payload,
+                                 stream=True, timeout=(10, 120))
         response.raise_for_status()
 
         for line in response.iter_lines(decode_unicode=True):

@@ -32,10 +32,11 @@ class LLMClient(ABC):
         exhausted.
         """
         last_error: Exception | None = None
+        use_stream = self.stream  # mutable — falls back on failure
 
         for attempt in range(1, self.max_retries + 1):
             try:
-                if self.stream:
+                if use_stream:
                     result = self._generate_stream(prompt)
                 else:
                     result = self._generate(prompt)
@@ -56,6 +57,10 @@ class LLMClient(ABC):
                 last_error = e
                 log.warning(
                     f"[LLM] Error on attempt {attempt}/{self.max_retries}: {e}")
+                # If streaming failed, fall back to non-streaming for next retry
+                if use_stream:
+                    log.warning("[LLM] Streaming failed — falling back to non-streaming")
+                    use_stream = False
                 if attempt < self.max_retries:
                     time.sleep(self.retry_delay * attempt)
 

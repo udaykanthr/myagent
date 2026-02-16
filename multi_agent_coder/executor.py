@@ -70,8 +70,14 @@ class Executor:
     def write_files(files: Dict[str, str], base_dir: str = ".") -> List[str]:
         """
         Writes files to disk. Returns list of written file paths.
+
+        For Python files, automatically creates ``__init__.py`` in every
+        parent directory so that imports like ``from src.module import X``
+        work out of the box.
         """
         written = []
+        init_dirs: set[str] = set()
+
         for filename, content in files.items():
             filepath = os.path.join(base_dir, filename)
             dirpath = os.path.dirname(filepath)
@@ -81,6 +87,24 @@ class Executor:
                 f.write(content)
             log.info(f"Written: {filepath}")
             written.append(filepath)
+
+            # Track directories that contain .py files
+            if filename.endswith(".py") and dirpath and dirpath != base_dir:
+                # Walk up to base_dir creating __init__.py at each level
+                d = dirpath
+                while d and d != base_dir and d != os.path.dirname(d):
+                    init_dirs.add(d)
+                    d = os.path.dirname(d)
+
+        # Auto-create missing __init__.py so directories are importable packages
+        for dirpath in sorted(init_dirs):
+            init_path = os.path.join(dirpath, "__init__.py")
+            if not os.path.exists(init_path):
+                with open(init_path, "w", encoding="utf-8") as f:
+                    f.write("")
+                log.info(f"Auto-created: {init_path}")
+                written.append(init_path)
+
         return written
 
     # PowerShell cmdlets that cmd.exe cannot run directly
@@ -101,7 +125,7 @@ class Executor:
         return False
 
     @staticmethod
-    def run_command(cmd: str) -> Tuple[bool, str]:
+    def run_command(cmd: str, env: dict | None = None) -> Tuple[bool, str]:
         """
         Runs an arbitrary shell command. Returns (success, output).
         On Windows, auto-wraps PowerShell cmdlets so they don't fail
@@ -114,7 +138,8 @@ class Executor:
                 cmd = f'powershell -NoProfile -Command "{escaped}"'
 
             result = subprocess.run(
-                cmd, shell=True, capture_output=True, text=True, check=False
+                cmd, shell=True, capture_output=True, text=True,
+                check=False, env=env,
             )
             output = result.stdout + result.stderr
             return result.returncode == 0, output.strip()
@@ -123,8 +148,16 @@ class Executor:
 
     @staticmethod
     def run_tests(test_command: str = "pytest") -> Tuple[bool, str]:
-        """Shortcut to run tests."""
-        return Executor.run_command(test_command)
+        """Run tests with the project root on PYTHONPATH.
+
+        This ensures imports like ``from src.my_module import X`` resolve
+        correctly regardless of how pytest discovers the tests.
+        """
+        env = os.environ.copy()
+        cwd = os.getcwd()
+        existing = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = cwd + (os.pathsep + existing if existing else "")
+        return Executor.run_command(test_command, env=env)
 
     @staticmethod
     def parse_step_dependencies(steps: List[str]) -> Tuple[List[str], Dict[int, set]]:

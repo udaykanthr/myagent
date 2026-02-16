@@ -31,7 +31,8 @@ class LMStudioClient(LLMClient):
         }
         headers = {"Content-Type": "application/json"}
         url = f"{self.base_url}/chat/completions"
-        response = requests.post(url, headers=headers, json=payload)
+        response = requests.post(url, headers=headers, json=payload,
+                                 timeout=(10, 300))
         response.raise_for_status()
         data = response.json()
 
@@ -69,7 +70,9 @@ class LMStudioClient(LLMClient):
         content_parts: list[str] = []
         tokens_generated = 0
 
-        response = requests.post(url, headers=headers, json=payload, stream=True)
+        # timeout: (connect, read-per-chunk); generous read timeout for slow models
+        response = requests.post(url, headers=headers, json=payload,
+                                 stream=True, timeout=(10, 120))
         response.raise_for_status()
 
         for line in response.iter_lines(decode_unicode=True):

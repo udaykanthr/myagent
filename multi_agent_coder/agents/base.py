@@ -15,8 +15,11 @@ class Agent(ABC):
         """
         pass
 
-    def _build_prompt(self, task: str, context: str) -> str:
+    def _build_prompt(self, task: str, context: str, language: str | None = None) -> str:
         prompt = f"Role: {self.role}\nGoal: {self.goal}\n\n"
+        if language:
+            from ..language import get_language_name
+            prompt += f"Language: {get_language_name(language)}\n\n"
         if context:
             prompt += f"Context: {context}\n\n"
         prompt += f"Task: {task}\n\nResponse:"

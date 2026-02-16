@@ -2,6 +2,8 @@ import logging
 import os
 import sys
 import shutil
+import threading
+import time as _time
 from datetime import datetime
 
 
@@ -68,6 +70,8 @@ class CLIDisplay:
         self.current_step = -1
         self.status_message = ""
         self._refresh_size()
+        self._render_lock = threading.Lock()
+        self._last_stream_render: float = 0.0
 
     def _refresh_size(self):
         size = shutil.get_terminal_size((80, 24))
@@ -142,6 +146,11 @@ class CLIDisplay:
 
     def render(self):
         """Redraw the full CLI display with positioned sections."""
+        with self._render_lock:
+            self._render_unlocked()
+
+    def _render_unlocked(self):
+        """Internal render (caller must hold _render_lock)."""
         self._refresh_size()
         w = self.term_width
         h = self.term_height
@@ -250,3 +259,104 @@ class CLIDisplay:
         else:
             print(self._center("✘  Some steps failed. Check logs for details."))
         print()
+
+    # ── Interactive prompts (temporarily exit full-screen mode) ──
+
+    def update_streaming_progress(self, step_idx: int, tokens: int):
+        """Throttled progress update during streaming (max every 0.5s)."""
+        now = _time.monotonic()
+        if now - self._last_stream_render < 0.5:
+            return
+        self._last_stream_render = now
+        self.step_info(step_idx, f"Generating... ({tokens} tokens)")
+
+    @staticmethod
+    def prompt_plan_approval(steps: list[str]) -> tuple[str, list[int]]:
+        """Show numbered steps and ask user to approve, replan, or edit.
+
+        Returns ``("approve" | "replan" | "edit", removed_indices)``
+        where *removed_indices* is a list of 0-based step indices to drop.
+        """
+        print("\n" + "=" * 60)
+        print("  PROPOSED PLAN")
+        print("=" * 60)
+        for i, step in enumerate(steps, 1):
+            print(f"  {i}. {step}")
+        print("=" * 60)
+        print("  [A]pprove  |  [R]eplan  |  [E]dit (comma-separated step numbers to remove)")
+        print()
+
+        while True:
+            choice = input("  Your choice: ").strip().lower()
+            if choice in ("a", "approve"):
+                return "approve", []
+            elif choice in ("r", "replan"):
+                return "replan", []
+            elif choice.startswith("e") or choice.startswith("edit"):
+                # Parse step numbers after 'e' or 'edit'
+                rest = choice.lstrip("edit").strip(" ,:")
+                if not rest:
+                    rest = input("  Steps to remove (comma-separated numbers): ").strip()
+                try:
+                    indices = [int(x.strip()) - 1 for x in rest.split(",") if x.strip().isdigit()]
+                    return "edit", indices
+                except ValueError:
+                    print("  Invalid input. Try again.")
+            else:
+                print("  Invalid choice. Use A, R, or E.")
+
+    @staticmethod
+    def prompt_resume(checkpoint_state: dict) -> bool:
+        """Show checkpoint info and ask whether to resume.
+
+        Returns ``True`` to resume, ``False`` to start fresh.
+        """
+        print("\n" + "=" * 60)
+        print("  CHECKPOINT FOUND")
+        print("=" * 60)
+        print(f"  Task: {checkpoint_state.get('task', '?')}")
+        completed = checkpoint_state.get("completed_step", -1)
+        total = len(checkpoint_state.get("steps", []))
+        print(f"  Progress: {completed + 1}/{total} steps completed")
+        print(f"  Language: {checkpoint_state.get('language', '?')}")
+        print("=" * 60)
+        print("  [R]esume  |  [S]tart fresh")
+        print()
+
+        while True:
+            choice = input("  Your choice: ").strip().lower()
+            if choice in ("r", "resume"):
+                return True
+            elif choice in ("s", "start", "fresh"):
+                return False
+            else:
+                print("  Invalid choice. Use R or S.")
+
+    @staticmethod
+    def prompt_git_action(action: str) -> str:
+        """Ask user about a git action.
+
+        *action* is ``"complete"`` (task succeeded) or ``"failed"`` (task failed).
+        Returns ``"commit"``, ``"rollback"``, or ``"skip"``.
+        """
+        print("\n" + "=" * 60)
+        if action == "complete":
+            print("  TASK COMPLETED — Git Options")
+            print("=" * 60)
+            print("  [C]ommit changes  |  [S]kip (leave uncommitted)")
+        else:
+            print("  TASK FAILED — Git Options")
+            print("=" * 60)
+            print("  [R]ollback to checkpoint  |  [C]ommit as-is  |  [S]kip")
+        print()
+
+        while True:
+            choice = input("  Your choice: ").strip().lower()
+            if choice in ("c", "commit"):
+                return "commit"
+            elif choice in ("r", "rollback") and action != "complete":
+                return "rollback"
+            elif choice in ("s", "skip"):
+                return "skip"
+            else:
+                print("  Invalid choice. Try again.")

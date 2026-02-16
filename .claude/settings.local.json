@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c:*)",
+      "Bash(python -m multi_agent_coder.orchestrator:*)",
+      "Bash(findstr:*)"
+    ]
+  }
+}

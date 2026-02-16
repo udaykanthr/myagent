@@ -83,12 +83,36 @@ class Executor:
             written.append(filepath)
         return written
 
+    # PowerShell cmdlets that cmd.exe cannot run directly
+    _PS_CMDLETS = (
+        'Get-ChildItem', 'Set-Location', 'Get-Content', 'Select-Object',
+        'Where-Object', 'ForEach-Object', 'New-Item', 'Remove-Item',
+        'Copy-Item', 'Move-Item', 'Test-Path', 'Invoke-WebRequest',
+        'Write-Output', 'Out-File', 'Set-Content', 'Get-Command',
+        'Get-Process', 'Stop-Process', 'Get-Service', 'Resolve-Path',
+    )
+
+    @staticmethod
+    def _needs_powershell(cmd: str) -> bool:
+        """Return True if *cmd* contains PowerShell-specific cmdlets."""
+        for cmdlet in Executor._PS_CMDLETS:
+            if cmdlet in cmd:
+                return True
+        return False
+
     @staticmethod
     def run_command(cmd: str) -> Tuple[bool, str]:
         """
         Runs an arbitrary shell command. Returns (success, output).
+        On Windows, auto-wraps PowerShell cmdlets so they don't fail
+        in the default cmd.exe shell.
         """
         try:
+            if os.name == 'nt' and Executor._needs_powershell(cmd):
+                # Escape double quotes inside the command for PowerShell
+                escaped = cmd.replace('"', '\\"')
+                cmd = f'powershell -NoProfile -Command "{escaped}"'
+
             result = subprocess.run(
                 cmd, shell=True, capture_output=True, text=True, check=False
             )

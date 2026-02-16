@@ -1,16 +1,25 @@
+import os
+
 from .base import Agent
+
+
+def _shell_example() -> str:
+    """Return an OS-appropriate file-listing command example."""
+    if os.name == 'nt':
+        return "  1. List all project files with `dir /s /b`"
+    return "  1. List all project files with `find . -type f`"
 
 
 class PlannerAgent(Agent):
     def process(self, task: str, context: str = "") -> str:
         prompt = self._build_prompt(task, context)
-        prompt += """
+        prompt += f"""
 
 Provide a step-by-step plan as a numbered list.
 Keep each step short and actionable. Do NOT include code in this plan.
 For steps that involve running shell commands (scanning files, listing directories,
 installing packages, etc.), include the exact command in backticks, e.g.:
-  1. List all project files with `tree /F` or `Get-ChildItem -Recurse`
+{_shell_example()}
   2. Install dependencies with `pip install -r requirements.txt`
 
 For each step, if it depends on a previous step being completed first, add (depends: N) or (depends: N, M) at the end of the step.

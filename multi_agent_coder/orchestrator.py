@@ -1,4 +1,6 @@
 import argparse
+import os
+import platform
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -26,6 +28,35 @@ from . import git_utils
 
 MAX_STEP_RETRIES = 3
 MAX_DIAGNOSIS_RETRIES = 2   # outer retries: diagnose failure → fix → re-run step
+
+
+def _shell_instructions() -> str:
+    """Return OS-aware shell command guidance for LLM prompts."""
+    if os.name == 'nt':
+        return (
+            "Use plain CMD commands that work in Windows cmd.exe.\n"
+            "For listing files use: dir /s /b\n"
+            "For reading a file use: type <path>\n"
+            "For creating a directory use: mkdir <path>\n"
+            "For installing Python packages use: pip install <package>\n"
+            "Do NOT use PowerShell cmdlets like Get-ChildItem, Select-Object, etc.\n"
+        )
+    else:
+        return (
+            f"Use standard shell commands for {platform.system()}.\n"
+            "For listing files use: find . -type f\n"
+            "For reading a file use: cat <path>\n"
+            "For creating a directory use: mkdir -p <path>\n"
+            "For installing Python packages use: pip install <package>\n"
+        )
+
+
+def _shell_examples() -> str:
+    """Return OS-aware example commands for the planner prompt."""
+    if os.name == 'nt':
+        return "  1. List all project files with `dir /s /b`"
+    else:
+        return "  1. List all project files with `find . -type f`"
 
 
 # ───────────────────────────────────────────────────────────────
@@ -186,9 +217,7 @@ def _handle_cmd_step(step_text: str, executor: Executor,
             "You are a shell command generator. Given a task step, output "
             "ONLY the shell command to accomplish it. No explanations, no "
             "markdown, no backticks — just the raw command.\n"
-            "Use commands that work on Windows (PowerShell). "
-            "For listing files use: Get-ChildItem -Recurse | Select-Object FullName\n"
-            "For reading a file use: Get-Content <path>\n\n"
+            f"{_shell_instructions()}\n"
             f"Step: {step_text}\n\n"
             "Command:"
         )

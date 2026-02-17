@@ -31,7 +31,11 @@ class Executor:
 
     @staticmethod
     def _sanitize_filename(raw: str) -> str:
-        """Clean up LLM-generated filenames that may contain junk."""
+        """Clean up LLM-generated filenames that may contain junk.
+
+        Also blocks path traversal (``../``) so that LLM output can
+        never write files outside the project directory.
+        """
         name = raw.strip()
         # Strip trailing parenthetical descriptions: "file.py (main file)"
         name = re.sub(r'\s*\(.*?\)\s*$', '', name)
@@ -45,6 +49,11 @@ class Executor:
         name = name.replace('\\', '/')
         # Remove leading ./ if present
         name = re.sub(r'^\./', '', name)
+        # Block path traversal: remove all ".." segments
+        parts = [p for p in name.split('/') if p and p != '..']
+        name = '/'.join(parts)
+        # Remove leading slashes (absolute paths → relative)
+        name = name.lstrip('/')
         return name.strip()
 
     @staticmethod
@@ -233,26 +242,80 @@ class Executor:
         return False
 
     @staticmethod
-    def run_command(cmd: str, env: dict | None = None) -> Tuple[bool, str]:
+    def run_command(cmd: str, env: dict | None = None,
+                    timeout: int = 120) -> Tuple[bool, str]:
         """
         Runs an arbitrary shell command. Returns (success, output).
         On Windows, auto-wraps PowerShell cmdlets so they don't fail
         in the default cmd.exe shell.
+
+        stdout and stderr are merged into a single stream so that
+        output from test runners (which often write to stderr) is
+        never lost.
         """
         try:
+            log.info(f"[Executor] Running command: {cmd}")
             if os.name == 'nt' and Executor._needs_powershell(cmd):
                 # Escape double quotes inside the command for PowerShell
                 escaped = cmd.replace('"', '\\"')
                 cmd = f'powershell -NoProfile -Command "{escaped}"'
 
-            result = subprocess.run(
-                cmd, shell=True, capture_output=True, text=True,
-                check=False, env=env,
+            # Build environment — disable color codes for clean capture
+            run_env = env if env else os.environ.copy()
+            run_env["NO_COLOR"] = "1"
+            run_env["FORCE_COLOR"] = "0"
+
+            # Read as raw bytes and decode manually. On Windows, text=True
+            # uses cp1252 by default, but most tools (Node.js, Jest, Go)
+            # output UTF-8.  This mismatch causes empty/garbled output.
+            proc = subprocess.Popen(
+                cmd, shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                env=run_env,
             )
-            output = result.stdout + result.stderr
-            return result.returncode == 0, output.strip()
+            stdout_bytes, _ = proc.communicate(timeout=timeout)
+            output = Executor._decode_output(stdout_bytes)
+            log.info(f"[Executor] Exit code: {proc.returncode}, "
+                     f"output={len(output)} chars")
+
+            if not output.strip() and proc.returncode != 0:
+                # Command failed silently — provide useful context
+                output = (
+                    f"Command `{cmd}` exited with code {proc.returncode} "
+                    f"but produced no output.\n"
+                    f"Possible causes:\n"
+                    f"- The tool/binary is not installed or not on PATH\n"
+                    f"- A required config file is missing\n"
+                    f"- The command crashed before it could produce output"
+                )
+                log.warning(f"[Executor] {output}")
+
+            return proc.returncode == 0, output.strip()
+        except subprocess.TimeoutExpired:
+            log.warning(f"[Executor] Command timed out after {timeout}s: {cmd}")
+            proc.kill()
+            stdout_bytes, _ = proc.communicate()
+            output = Executor._decode_output(stdout_bytes)
+            return False, f"Command timed out after {timeout} seconds.\n{output}".strip()
         except Exception as e:
+            log.error(f"[Executor] Exception running command: {e}")
             return False, str(e)
+
+    @staticmethod
+    def _decode_output(raw: bytes | None) -> str:
+        """Decode subprocess output, trying UTF-8 first then system default."""
+        if not raw:
+            return ""
+        try:
+            return raw.decode("utf-8")
+        except (UnicodeDecodeError, ValueError):
+            pass
+        try:
+            import locale
+            return raw.decode(locale.getpreferredencoding(False), errors="replace")
+        except (UnicodeDecodeError, ValueError, LookupError):
+            return raw.decode("ascii", errors="replace")
 
     @staticmethod
     def run_tests(test_command: str = "pytest") -> Tuple[bool, str]:
@@ -260,11 +323,25 @@ class Executor:
 
         This ensures imports like ``from src.my_module import X`` resolve
         correctly regardless of how pytest discovers the tests.
+
+        If the test runner binary is not found, returns a clear error
+        message instead of a silent failure.
         """
         env = os.environ.copy()
         cwd = os.getcwd()
         existing = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = cwd + (os.pathsep + existing if existing else "")
+
+        # Quick check: does the test runner binary exist?
+        runner = test_command.split()[0]  # e.g. "pytest", "npx", "go"
+        import shutil
+        if not shutil.which(runner, path=env.get("PATH")):
+            msg = (f"Test runner `{runner}` is not installed or not on PATH.\n"
+                   f"Install it first (e.g. `pip install {runner}` or "
+                   f"`npm install --save-dev {runner}`).")
+            log.warning(f"[Executor] {msg}")
+            return False, msg
+
         return Executor.run_command(test_command, env=env)
 
     # ── Missing-package auto-install ──

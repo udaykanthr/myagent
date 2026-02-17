@@ -1,7 +1,10 @@
 import logging
 import os
+import re
+import subprocess
 import sys
 import shutil
+import tempfile
 import threading
 import time as _time
 from datetime import datetime
@@ -271,11 +274,16 @@ class CLIDisplay:
         self.step_info(step_idx, f"Generating... ({tokens} tokens)")
 
     @staticmethod
-    def prompt_plan_approval(steps: list[str]) -> tuple[str, list[int]]:
+    def prompt_plan_approval(steps: list[str]) -> tuple[str, list[int], list[str] | None]:
         """Show numbered steps and ask user to approve, replan, or edit.
 
-        Returns ``("approve" | "replan" | "edit", removed_indices)``
-        where *removed_indices* is a list of 0-based step indices to drop.
+        Returns ``(action, removed_indices, edited_steps)`` where *action*
+        is ``"approve"``, ``"replan"``, or ``"edit"``.
+
+        When the user chooses **Edit**, a system text editor is opened
+        (``notepad`` on Windows, ``vi`` on other OS) so the user can
+        freely modify the plan. After saving and closing, the updated
+        steps are returned in *edited_steps*.
         """
         print("\n" + "=" * 60)
         print("  PROPOSED PLAN")
@@ -283,27 +291,89 @@ class CLIDisplay:
         for i, step in enumerate(steps, 1):
             print(f"  {i}. {step}")
         print("=" * 60)
-        print("  [A]pprove  |  [R]eplan  |  [E]dit (comma-separated step numbers to remove)")
+        print("  [A]pprove  |  [R]eplan  |  [E]dit (open in editor)")
         print()
 
         while True:
             choice = input("  Your choice: ").strip().lower()
             if choice in ("a", "approve"):
-                return "approve", []
+                return "approve", [], None
             elif choice in ("r", "replan"):
-                return "replan", []
-            elif choice.startswith("e") or choice.startswith("edit"):
-                # Parse step numbers after 'e' or 'edit'
-                rest = choice.lstrip("edit").strip(" ,:")
-                if not rest:
-                    rest = input("  Steps to remove (comma-separated numbers): ").strip()
-                try:
-                    indices = [int(x.strip()) - 1 for x in rest.split(",") if x.strip().isdigit()]
-                    return "edit", indices
-                except ValueError:
-                    print("  Invalid input. Try again.")
+                return "replan", [], None
+            elif choice in ("e", "edit"):
+                edited = CLIDisplay._edit_plan_in_editor(steps)
+                if edited:
+                    return "edit", [], edited
+                else:
+                    print("  No changes detected or empty plan. Showing plan again.")
+                    # Re-display the plan and loop
+                    print("\n" + "=" * 60)
+                    print("  PROPOSED PLAN")
+                    print("=" * 60)
+                    for i, step in enumerate(steps, 1):
+                        print(f"  {i}. {step}")
+                    print("=" * 60)
+                    print("  [A]pprove  |  [R]eplan  |  [E]dit (open in editor)")
+                    print()
             else:
                 print("  Invalid choice. Use A, R, or E.")
+
+    @staticmethod
+    def _edit_plan_in_editor(steps: list[str]) -> list[str] | None:
+        """Write *steps* to a temp file, open a system editor, and return
+        the modified steps after the user saves and closes the editor.
+
+        Uses ``notepad`` on Windows and ``vi`` on other operating systems.
+        Returns ``None`` if the resulting file is empty.
+        """
+        # Build file content with numbered steps
+        content = "# Edit the plan below. One step per line.\n"
+        content += "# Lines starting with '#' are ignored.\n"
+        content += "# You may add, remove, or reorder steps.\n\n"
+        for i, step in enumerate(steps, 1):
+            content += f"{i}. {step}\n"
+
+        # Write to a temp file
+        tmp = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".txt", prefix="plan_", delete=False, encoding="utf-8"
+        )
+        try:
+            tmp.write(content)
+            tmp.close()
+
+            # Choose editor based on OS
+            if os.name == "nt":
+                editor = "notepad"
+            else:
+                editor = os.environ.get("EDITOR", "vi")
+
+            print(f"\n  Opening plan in {editor}...")
+            print("  Save and close the editor when done.\n")
+
+            subprocess.call([editor, tmp.name])
+
+            # Read back the edited file
+            with open(tmp.name, "r", encoding="utf-8") as f:
+                edited_content = f.read()
+        finally:
+            try:
+                os.unlink(tmp.name)
+            except OSError:
+                pass
+
+        # Parse edited content into step list
+        edited_steps: list[str] = []
+        for line in edited_content.splitlines():
+            line = line.strip()
+            # Skip empty lines and comments
+            if not line or line.startswith("#"):
+                continue
+            # Strip leading number + dot  (e.g. "1. Do something" -> "Do something")
+            line = re.sub(r"^\d+\.\s*", "", line)
+            if line:
+                edited_steps.append(line)
+
+        return edited_steps if edited_steps else None
 
     @staticmethod
     def prompt_resume(checkpoint_state: dict) -> bool:

@@ -29,6 +29,24 @@ from . import git_utils
 MAX_STEP_RETRIES = 3
 MAX_DIAGNOSIS_RETRIES = 2   # outer retries: diagnose failure → fix → re-run step
 
+# Map test runner binary → install command
+_RUNNER_INSTALL = {
+    "pytest": "pip install pytest",
+    "jest": "npm install --save-dev jest",
+    "npx": "npm install --save-dev jest",
+    "mocha": "npm install --save-dev mocha",
+    "vitest": "npm install --save-dev vitest",
+    "go": None,  # built-in, no install needed
+    "cargo": None,
+    "rspec": "gem install rspec",
+    "phpunit": "composer require --dev phpunit/phpunit",
+}
+
+
+def _get_runner_install_cmd(runner: str) -> str:
+    """Return the install command for a test runner binary."""
+    return _RUNNER_INSTALL.get(runner, f"pip install {runner}")
+
 
 def _shell_instructions() -> str:
     """Return OS-aware shell command guidance for LLM prompts."""
@@ -425,6 +443,23 @@ def _handle_test_step(step_text: str, tester: TesterAgent, coder: CoderAgent,
     lang_tag = get_code_block_lang(language) if language else "python"
     test_cmd = get_test_framework(language)["command"] if language else "pytest"
 
+    # Ensure the test runner binary is installed before attempting to run tests
+    import shutil
+    parts = test_cmd.split()
+    runner = parts[0]
+    # For "npx <tool>", the binary to check is "npx" itself
+    if not shutil.which(runner):
+        actual_tool = parts[1] if runner == "npx" and len(parts) > 1 else runner
+        install_cmd = _get_runner_install_cmd(actual_tool)
+        display.step_info(step_idx, f"`{runner}` not found, installing...")
+        log.info(f"Step {step_idx+1}: Auto-installing: {install_cmd}")
+        ok, out = executor.run_command(install_cmd)
+        if ok:
+            display.step_info(step_idx, f"Installed `{actual_tool}`")
+        else:
+            log.warning(f"Step {step_idx+1}: Failed to install "
+                        f"{actual_tool}: {out[:200]}")
+
     code_summary = ""
     for fname, content in memory.all_files().items():
         code_summary += f"#### [FILE]: {fname}\n```{lang_tag}\n{content}\n```\n\n"
@@ -497,16 +532,45 @@ def _handle_test_step(step_text: str, tester: TesterAgent, coder: CoderAgent,
         memory.update(test_files)
         display.step_info(step_idx, f"Tests written: {', '.join(written)}")
 
+        prev_output = None
         for run_attempt in range(1, MAX_STEP_RETRIES + 1):
-            display.step_info(step_idx, f"Running tests (attempt {run_attempt})...")
+            display.step_info(step_idx, f"Running: {test_cmd} (attempt {run_attempt})...")
+            log.info(f"Step {step_idx+1}: Running test command: {test_cmd}")
             success, output = executor.run_tests(test_cmd)
-            log.info(f"Step {step_idx+1}: Test run output:\n{output}")
+            log.info(f"Step {step_idx+1}: Test run output:\n{output or '(no output)'}")
 
             last_test_output = output
 
             if success:
                 display.step_info(step_idx, "Tests passed ✔")
                 return True, ""
+
+            # Detect stuck loop: same error output repeating means code
+            # fixes aren't helping (likely an infra/tool issue, not code)
+            if prev_output and output == prev_output and run_attempt > 1:
+                display.step_info(step_idx,
+                                  "Same error repeating — not a code issue, stopping retry loop.")
+                log.warning(f"Step {step_idx+1}: Identical test output on attempt "
+                            f"{run_attempt}, breaking retry loop.")
+                break
+            prev_output = output
+
+            # If test runner itself is not installed, try to install it
+            if "not installed" in output or "not on PATH" in output:
+                runner_parts = test_cmd.split()
+                actual_tool = runner_parts[1] if runner_parts[0] == "npx" and len(runner_parts) > 1 else runner_parts[0]
+                install_cmd = _get_runner_install_cmd(actual_tool)
+                display.step_info(step_idx, f"Installing `{actual_tool}`...")
+                log.info(f"Step {step_idx+1}: Installing test runner: {install_cmd}")
+                ok, out = executor.run_command(install_cmd)
+                if ok:
+                    display.step_info(step_idx, f"Installed `{actual_tool}`, re-running...")
+                    success, output = executor.run_tests(test_cmd)
+                    last_test_output = output
+                    if success:
+                        display.step_info(step_idx, "Tests passed after runner install ✔")
+                        return True, ""
+                continue  # retry with coder fix if runner install + rerun still failed
 
             # Auto-install missing packages before asking coder to fix
             missing_pkgs = executor.detect_missing_packages(output)
@@ -516,8 +580,9 @@ def _handle_test_step(step_text: str, tester: TesterAgent, coder: CoderAgent,
                 install_ok, install_out = executor.install_packages(missing_pkgs)
                 if install_ok:
                     display.step_info(step_idx, "Packages installed, re-running tests...")
+                    log.info(f"Step {step_idx+1}: Re-running test command: {test_cmd}")
                     success, output = executor.run_tests(test_cmd)
-                    log.info(f"Step {step_idx+1}: Test re-run after install:\n{output}")
+                    log.info(f"Step {step_idx+1}: Test re-run after install:\n{output or '(no output)'}")
                     last_test_output = output
                     if success:
                         display.step_info(step_idx, "Tests passed after package install ✔")
@@ -526,8 +591,10 @@ def _handle_test_step(step_text: str, tester: TesterAgent, coder: CoderAgent,
                     log.warning(f"Step {step_idx+1}: Package install failed: {install_out}")
 
             display.step_info(step_idx, "Tests failed, asking coder to fix...")
+            error_detail = output[:500] if output else f"(command `{test_cmd}` produced no output — it may have crashed or the test framework may not be installed)"
             fix_context = (
-                f"Test errors:\n{output[:500]}\n"
+                f"Test command: `{test_cmd}`\n"
+                f"Test errors:\n{error_detail}\n"
                 f"Project files:\n{code_summary}"
             )
 
@@ -996,7 +1063,7 @@ def main():
         if args.auto:
             log.info(f"Auto-approved {len(steps)} steps (--auto mode)")
         while not args.auto:
-            action, removed = CLIDisplay.prompt_plan_approval(steps)
+            action, removed, edited_steps = CLIDisplay.prompt_plan_approval(steps)
             if action == "approve":
                 break
             elif action == "replan":
@@ -1009,12 +1076,8 @@ def main():
                     print("\n  [ERROR] Could not parse re-plan steps.\n")
                     return
                 steps, dependencies = executor.parse_step_dependencies(raw_steps)
-            elif action == "edit" and removed:
-                # Remove steps by index (descending to preserve indices)
-                for idx in sorted(removed, reverse=True):
-                    if 0 <= idx < len(steps):
-                        steps.pop(idx)
-                # Rebuild dependencies after removal
+            elif action == "edit" and edited_steps:
+                steps = edited_steps
                 _, dependencies = executor.parse_step_dependencies(steps)
 
         display.set_steps(steps)

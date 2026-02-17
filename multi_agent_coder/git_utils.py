@@ -17,7 +17,7 @@ def _run_git(cmd: str) -> tuple[bool, str]:
             text=True,
             check=False,
         )
-        output = (result.stdout + result.stderr).strip()
+        output = ((result.stdout or "") + (result.stderr or "")).strip()
         return result.returncode == 0, output
     except Exception as e:
         return False, str(e)

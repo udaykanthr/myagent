@@ -77,8 +77,10 @@ def generate_html_report(
     done = sum(1 for s in steps if s.status == "done")
     failed = sum(1 for s in steps if s.status == "failed")
     skipped = sum(1 for s in steps if s.status == "skipped")
-    total_sent = sum(s.tokens_sent for s in steps)
-    total_recv = sum(s.tokens_recv for s in steps)
+    # Use token_usage dict (global tracker) as the authoritative source for
+    # dashboard totals; fall back to summing per-step values.
+    total_sent = token_usage.get("sent", 0) or sum(s.tokens_sent for s in steps)
+    total_recv = token_usage.get("recv", 0) or sum(s.tokens_recv for s in steps)
 
     # Build step HTML
     steps_html = ""

@@ -475,7 +475,17 @@ def main():
             if not pipeline_success:
                 break
 
-    # ── 14. Finish ──
+    # ── 14. Populate step reports from display state ──
+    for i, sr in enumerate(step_reports):
+        if i < len(display.steps):
+            ds = display.steps[i]
+            sr.status = ds.get("status", sr.status)
+            sr.step_type = ds.get("type", sr.step_type)
+            tokens = ds.get("tokens", {})
+            sr.tokens_sent = tokens.get("sent", 0)
+            sr.tokens_recv = tokens.get("recv", 0)
+
+    # ── 15. Finish ──
     if pipeline_success:
         display.finish(success=True)
         clear_checkpoint(checkpoint_file)

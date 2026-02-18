@@ -351,8 +351,7 @@ class Executor:
         except (UnicodeDecodeError, ValueError, LookupError):
             return raw.decode("ascii", errors="replace")
 
-    @staticmethod
-    def run_tests(test_command: str = "pytest") -> Tuple[bool, str]:
+    def run_tests(self, test_command: str = "pytest") -> Tuple[bool, str]:
         """Run tests with the project root on PYTHONPATH.
 
         This ensures imports like ``from src.my_module import X`` resolve
@@ -376,7 +375,7 @@ class Executor:
             log.warning(f"[Executor] {msg}")
             return False, msg
 
-        return Executor.run_command(test_command, env=env)
+        return self.run_command(test_command, env=env)
 
     # ── Missing-package auto-install ──
 
@@ -445,14 +444,13 @@ class Executor:
 
         return packages
 
-    @staticmethod
-    def install_packages(packages: List[str]) -> Tuple[bool, str]:
+    def install_packages(self, packages: List[str]) -> Tuple[bool, str]:
         """Install packages via pip. Returns (all_succeeded, combined_output)."""
         if not packages:
             return True, ""
         cmd = f"pip install {' '.join(packages)}"
         log.info(f"[Executor] Auto-installing: {cmd}")
-        return Executor.run_command(cmd)
+        return self.run_command(cmd)
 
     @staticmethod
     def parse_step_dependencies(steps: List[str]) -> Tuple[List[str], Dict[int, set]]:

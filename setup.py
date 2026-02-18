@@ -6,10 +6,12 @@ setup(
     packages=find_packages(),
     install_requires=[
         "requests",
+        "pyyaml",
+        'windows-curses; sys_platform == "win32"',
     ],
     entry_points={
         "console_scripts": [
-            "agentchanti=multi_agent_coder.orchestrator:main",
+            "agentchanti=multi_agent_coder.orchestrator.cli:main",
         ],
     },
     author="Uday Kanth",

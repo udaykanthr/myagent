@@ -274,16 +274,15 @@ class CLIDisplay:
         self.step_info(step_idx, f"Generating... ({tokens} tokens)")
 
     @staticmethod
-    def prompt_plan_approval(steps: list[str]) -> tuple[str, list[int], list[str] | None]:
+    def prompt_plan_approval(steps: list[str],
+                             use_tui: bool = False) -> tuple[str, list[int], list[str] | None]:
         """Show numbered steps and ask user to approve, replan, or edit.
 
         Returns ``(action, removed_indices, edited_steps)`` where *action*
         is ``"approve"``, ``"replan"``, or ``"edit"``.
 
-        When the user chooses **Edit**, a system text editor is opened
-        (``notepad`` on Windows, ``vi`` on other OS) so the user can
-        freely modify the plan. After saving and closing, the updated
-        steps are returned in *edited_steps*.
+        When *use_tui* is True and curses is available, the TUI plan editor
+        is used instead of the plain text editor.
         """
         print("\n" + "=" * 60)
         print("  PROPOSED PLAN")
@@ -291,7 +290,10 @@ class CLIDisplay:
         for i, step in enumerate(steps, 1):
             print(f"  {i}. {step}")
         print("=" * 60)
-        print("  [A]pprove  |  [R]eplan  |  [E]dit (open in editor)")
+        if use_tui:
+            print("  [A]pprove  |  [R]eplan  |  [E]dit (TUI)  |  [T]ext editor")
+        else:
+            print("  [A]pprove  |  [R]eplan  |  [E]dit (open in editor)")
         print()
 
         while True:
@@ -301,20 +303,42 @@ class CLIDisplay:
             elif choice in ("r", "replan"):
                 return "replan", [], None
             elif choice in ("e", "edit"):
+                if use_tui:
+                    # Try TUI editor first
+                    try:
+                        from ..tui_editor import launch_tui_editor
+                        edited = launch_tui_editor(steps)
+                        if edited:
+                            return "edit", [], edited
+                        # TUI unavailable or cancelled — fall through
+                        print("  TUI editor not available or cancelled. "
+                              "Falling back to text editor.")
+                    except Exception:
+                        print("  TUI editor failed. Using text editor.")
+                # Fall back to text editor
                 edited = CLIDisplay._edit_plan_in_editor(steps)
                 if edited:
                     return "edit", [], edited
                 else:
                     print("  No changes detected or empty plan. Showing plan again.")
-                    # Re-display the plan and loop
                     print("\n" + "=" * 60)
                     print("  PROPOSED PLAN")
                     print("=" * 60)
                     for i, step in enumerate(steps, 1):
                         print(f"  {i}. {step}")
                     print("=" * 60)
-                    print("  [A]pprove  |  [R]eplan  |  [E]dit (open in editor)")
+                    if use_tui:
+                        print("  [A]pprove  |  [R]eplan  |  [E]dit (TUI)  |  [T]ext editor")
+                    else:
+                        print("  [A]pprove  |  [R]eplan  |  [E]dit (open in editor)")
                     print()
+            elif choice in ("t", "text") and use_tui:
+                # Direct text editor access when TUI mode is on
+                edited = CLIDisplay._edit_plan_in_editor(steps)
+                if edited:
+                    return "edit", [], edited
+                else:
+                    print("  No changes detected.")
             else:
                 print("  Invalid choice. Use A, R, or E.")
 

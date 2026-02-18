@@ -18,15 +18,15 @@
 <p align="center">
   <img src="https://img.shields.io/badge/python-3.10%2B-blue" alt="Python 3.10+">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License">
-  <img src="https://img.shields.io/badge/LLM-100%25%20Local-orange" alt="100% Local">
-  <img src="https://img.shields.io/badge/API%20keys-none%20required-brightgreen" alt="No API Keys">
+  <img src="https://img.shields.io/badge/LLM-Local%20%2B%20Cloud-orange" alt="Local + Cloud">
+  <img src="https://img.shields.io/badge/providers-Ollama%20%7C%20LM%20Studio%20%7C%20OpenAI-blueviolet" alt="Multiple Providers">
 </p>
 
 
 
 ## What is AgentChanti?
 
-AgentChanti is a **command-line tool** that takes a plain English description of a coding task and autonomously builds the software for you using a team of specialized AI agents, all running on your local machine with no cloud dependency:
+AgentChanti is a **command-line tool and Python library** that takes a plain English description of a coding task and autonomously builds the software for you using a team of specialized AI agents:
 
 | Agent | Role | What it does |
 |-------|------|--------------|
@@ -41,18 +41,28 @@ The agents collaborate in a pipeline with built-in retry loops, automatic failur
 
 ## Features
 
-- **100% Offline** -- Works with [Ollama](https://ollama.com) and [LM Studio](https://lmstudio.ai). No API keys, no cloud, no data leaves your machine.
-- **Multi-Language Support** -- Auto-detects your project's language (Python, JavaScript, TypeScript, Go, Rust, Java, Ruby, C++, and more) and adapts prompts, code style, and test frameworks accordingly.
-- **Existing Project Awareness** -- Scans your current directory before planning so the agents understand your codebase, dependencies, and structure.
-- **Plan Approval** -- Shows you the proposed plan and lets you approve, edit (remove steps), or ask for a replan before any code is written.
-- **Halt-on-Failure with Auto-Diagnosis** -- If a step fails, the pipeline stops, the LLM diagnoses the root cause, applies a fix, and retries from that step. No wasted work on downstream steps.
-- **Checkpoint & Resume** -- Saves progress after each step. If interrupted, resume exactly where you left off.
-- **Git Safety Net** -- Creates a checkpoint branch before execution. On success, offers to commit. On failure, offers to rollback to the clean state.
-- **Streaming Responses** -- Live token-count progress during LLM generation (no more frozen screens). Falls back to non-streaming automatically if the server doesn't support it.
-- **Context Window Protection** -- Automatically manages prompt size to stay within your model's context window.
-- **LLM Resilience** -- Retries with exponential backoff on connection errors, timeouts, or empty responses.
-- **Parallel Execution** -- Independent steps run in parallel when the planner marks them as having no dependencies.
-- **Beautiful CLI** -- Full-screen terminal UI with ASCII art banner, progress bar, per-step token tracking, and status icons.
+### Core
+- **Local + Cloud LLMs** — Works with [Ollama](https://ollama.com), [LM Studio](https://lmstudio.ai), and any **OpenAI-compatible API** (OpenAI, Groq, Together.ai, etc.)
+- **Multi-Language Support** — Auto-detects your project's language (Python, JavaScript, TypeScript, Go, Rust, Java, Ruby, C++, and more) and adapts prompts, code style, and test frameworks accordingly.
+- **Existing Project Awareness** — Scans your current directory before planning so the agents understand your codebase, dependencies, and structure.
+- **Parallel Execution** — Independent steps run in parallel when the planner marks them as having no dependencies.
+- **Halt-on-Failure with Auto-Diagnosis** — If a step fails, the pipeline stops, diagnoses the root cause, applies a fix, and retries. No wasted work.
+
+### Smart Features
+- **Persistent Embedding Store** — SQLite-backed vector cache that persists embeddings across runs. Unchanged files are never re-embedded, saving ~30s per run on large projects.
+- **Project Knowledge Base** — Learns from each run and stores patterns, fixes, conventions, and dependency info in `.agentchanti/knowledge.json`. Future runs benefit from accumulated knowledge.
+- **Step-Level Caching** — Hashes step inputs and caches LLM responses. Re-running the same task skips completed steps instantly. Configurable TTL (default: 24h).
+- **Custom Agent Prompts** — Override or extend agent behavior via `.agentchanti.yaml` config (coding conventions, review criteria, etc.)
+- **Plugin System** — Extend with custom step types (DEPLOY, LINT, DOCS, etc.) via Python classes.
+
+### Developer Experience
+- **TUI Plan Editor** — Interactive curses-based plan editor with arrow-key navigation, reordering, inline editing, and step deletion. Falls back to text editor on unsupported terminals.
+- **Multi-File Diff Preview** — See colored unified diffs of all file changes before they're written to disk.
+- **HTML Reports** — Auto-generates self-contained HTML reports after every run with a dark theme, dashboard stats, step breakdown, and colored diffs.
+- **Checkpoint & Resume** — Saves progress after each step. Resume exactly where you left off after interruption.
+- **Git Safety Net** — Creates a checkpoint branch before execution. Offers to commit on success or rollback on failure.
+- **Beautiful CLI** — Full-screen terminal UI with ASCII art banner, progress bar, per-step token tracking, and status icons.
+- **Library API** — Use AgentChanti programmatically with `run_task()` for backend integration.
 
 ---
 
@@ -82,7 +92,7 @@ That's it. AgentChanti will plan the steps, write the code, review it, generate 
 
 - **Python 3.10+** ([python.org](https://www.python.org/downloads/))
 - **Git** ([git-scm.com](https://git-scm.com/))
-- A local LLM server: **Ollama** or **LM Studio** (setup guide below)
+- A local LLM server **or** a cloud API key
 
 ### Option 1: Automatic Installer (Recommended)
 
@@ -119,17 +129,15 @@ pip install -e .
 agentchanti --help
 ```
 
-You should see the argument list with all available options.
-
 ---
 
 ## LLM Server Setup
 
-AgentChanti needs a local LLM running on your machine. Choose **one** of the following:
+AgentChanti supports three LLM providers. Choose **one** (or configure multiple):
 
 ### Option A: Ollama (Recommended for beginners)
 
-Ollama is the easiest way to run LLMs locally. One command to install, one command to download a model.
+Ollama is the easiest way to run LLMs locally.
 
 **Step 1: Install Ollama**
 
@@ -137,7 +145,7 @@ Ollama is the easiest way to run LLMs locally. One command to install, one comma
 |----------|---------|
 | **macOS** | `brew install ollama` or download from [ollama.com](https://ollama.com) |
 | **Linux** | `curl -fsSL https://ollama.com/install.sh \| sh` |
-| **Windows** | Download the installer from [ollama.com/download](https://ollama.com/download) |
+| **Windows** | Download from [ollama.com/download](https://ollama.com/download) |
 
 **Step 2: Download a Model**
 
@@ -145,7 +153,6 @@ Ollama is the easiest way to run LLMs locally. One command to install, one comma
 # Recommended coding models (pick one):
 ollama pull deepseek-coder-v2:16b       # Great for coding, 16B params
 ollama pull qwen2.5-coder:7b            # Lighter, still good
-ollama pull llama3:8b                   # General purpose
 ollama pull codellama:13b               # Meta's code-focused model
 
 # For semantic search (optional but recommended):
@@ -154,17 +161,11 @@ ollama pull nomic-embed-text            # Small embedding model
 
 > **Which model should I pick?** Bigger = smarter but slower. Start with a 7B model if you have 8GB RAM/VRAM, or a 13B-16B model if you have 16GB+.
 
-**Step 3: Start the Server**
+**Step 3: Start & Run**
 
 ```bash
 ollama serve
-```
-
-The server runs at `http://localhost:11434` by default. Leave this terminal open.
-
-**Step 4: Run AgentChanti**
-
-```bash
+# In another terminal:
 agentchanti "Create a REST API with Flask" --provider ollama --model deepseek-coder-v2:16b
 ```
 
@@ -174,52 +175,56 @@ agentchanti "Create a REST API with Flask" --provider ollama --model deepseek-co
 
 LM Studio provides a GUI for downloading and running models with an OpenAI-compatible API.
 
-**Step 1: Install LM Studio**
-
-Download from [lmstudio.ai](https://lmstudio.ai) and install. Available for Windows, macOS, and Linux.
-
-**Step 2: Download a Model**
-
-1. Open LM Studio
-2. Go to the **Search** tab (magnifying glass icon)
-3. Search for a coding model, for example:
-   - `deepseek-coder-v2-lite-instruct` (default, good balance)
-   - `Qwen2.5-Coder-7B-Instruct`
-   - `CodeLlama-13B-Instruct`
-4. Click **Download** on the quantization that fits your RAM (Q4_K_M is a good default)
-
-**Step 3: Start the Local Server**
-
-1. Go to the **Local Server** tab (the `<->` icon on the left)
-2. Select your downloaded model from the dropdown
-3. Click **Start Server**
-4. Default URL: `http://localhost:1234/v1`
-
-> **Important:** Make sure the server status shows **Running** (green indicator) before using AgentChanti.
-
-**Step 4: Run AgentChanti**
+1. Download from [lmstudio.ai](https://lmstudio.ai)
+2. Search and download a coding model (e.g., `deepseek-coder-v2-lite-instruct`)
+3. Go to **Local Server** tab → select model → click **Start Server**
+4. Run (LM Studio is the default provider):
 
 ```bash
-# LM Studio is the default provider, so this just works:
 agentchanti "Build a todo app with SQLite backend"
+```
+
+---
+
+### Option C: Cloud LLM (OpenAI-compatible)
+
+Use any OpenAI-compatible API — OpenAI, Groq, Together.ai, or any other compatible service.
+
+**Via environment variable:**
+```bash
+export OPENAI_API_KEY="sk-your-key-here"
+agentchanti "Create a REST API" --provider openai --model gpt-4o-mini
+```
+
+**Via config file (`.agentchanti.yaml`):**
+```yaml
+openai:
+  api_key: "sk-your-key-here"
+  base_url: "https://api.openai.com/v1"  # or Groq, Together.ai, etc.
+```
+
+```bash
+agentchanti "Create a REST API" --provider openai --model gpt-4o-mini
+```
+
+**Example: Using Groq**
+```bash
+export OPENAI_API_KEY="gsk_your-groq-key"
+export OPENAI_BASE_URL="https://api.groq.com/openai/v1"
+agentchanti "your task" --provider openai --model llama-3.1-70b-versatile
 ```
 
 ---
 
 ### Optional: Embedding Model (for smarter context retrieval)
 
-AgentChanti can use embeddings to find the most relevant files when building context for each step. This is optional but improves quality on larger projects.
+Embeddings help AgentChanti find the most relevant files for each step. Enabled by default with persistent SQLite caching.
 
-**Ollama:**
 ```bash
+# Ollama:
 ollama pull nomic-embed-text
-```
 
-**LM Studio:**
-Download `nomic-embed-text` from the model search.
-
-If you don't want embeddings (saves resources):
-```bash
+# Disable embeddings (saves resources):
 agentchanti "your task" --no-embeddings
 ```
 
@@ -237,14 +242,20 @@ agentchanti "<task description>" [options]
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `"task"` | The coding task to perform (required) | -- |
-| `--provider` | LLM provider: `ollama` or `lm_studio` | `lm_studio` |
+| `"task"` | The coding task to perform (required) | — |
+| `--provider` | LLM provider: `ollama`, `lm_studio`, or `openai` | `lm_studio` |
 | `--model` | Model name to use | `deepseek-coder-v2-lite-instruct` |
 | `--embed-model` | Embedding model name | `nomic-embed-text` |
 | `--language` | Override auto-detected language (e.g. `python`, `javascript`) | auto-detect |
+| `--config` | Path to `.agentchanti.yaml` config file | auto-discover |
 | `--no-embeddings` | Disable semantic embeddings | off |
-| `--no-stream` | Disable streaming (use if your server has issues) | off |
-| `--no-git` | Disable git checkpoint/rollback integration | off |
+| `--no-stream` | Disable streaming responses | off |
+| `--no-git` | Disable git checkpoint/rollback | off |
+| `--no-diff` | Disable diff preview before writing files | off |
+| `--no-cache` | Disable step-level caching | off |
+| `--clear-cache` | Clear step cache before running | off |
+| `--no-knowledge` | Disable project knowledge base | off |
+| `--report` / `--no-report` | Enable/disable HTML report generation | on |
 | `--resume` | Force resume from last checkpoint | off |
 | `--fresh` | Ignore any existing checkpoint and start fresh | off |
 | `--auto` | Non-interactive mode: auto-approve plan, skip all prompts | off |
@@ -253,17 +264,17 @@ agentchanti "<task description>" [options]
 
 **1. Simple Python script**
 ```bash
-agentchanti "Create a Python script that reads a CSV file and generates a bar chart using matplotlib"
+agentchanti "Create a Python script that reads a CSV and generates a bar chart using matplotlib"
 ```
 
 **2. Web application**
 ```bash
-agentchanti "Build a Flask REST API with endpoints for CRUD operations on a books database using SQLite"
+agentchanti "Build a Flask REST API with CRUD operations on a books database using SQLite"
 ```
 
-**3. Algorithm implementation**
+**3. Using a cloud provider**
 ```bash
-agentchanti "Implement a binary search tree with insert, delete, search, and in-order traversal in Python"
+OPENAI_API_KEY="sk-..." agentchanti "Build a CLI password generator" --provider openai --model gpt-4o-mini
 ```
 
 **4. Using Ollama with a specific model**
@@ -273,7 +284,7 @@ agentchanti "Create a CLI password generator" --provider ollama --model codellam
 
 **5. JavaScript / Node.js project**
 ```bash
-agentchanti "Create an Express.js REST API with user authentication using JWT" --language javascript
+agentchanti "Create an Express.js REST API with JWT authentication" --language javascript
 ```
 
 **6. Working on an existing project**
@@ -283,21 +294,169 @@ agentchanti "Add input validation to all API endpoints"
 # AgentChanti scans the directory first and understands your codebase
 ```
 
-**7. Resume after interruption**
+**7. Non-interactive (CI/scripts)**
 ```bash
-# Task was interrupted at step 5 of 10...
-agentchanti "Create a web scraper" --resume
-# Picks up from step 6
+agentchanti "Generate unit tests for all modules" --auto --no-git --no-report
 ```
 
-**8. Non-interactive (CI/scripts)**
+**8. Re-run with fresh cache**
 ```bash
-agentchanti "Generate unit tests for all modules" --auto --no-git
+agentchanti "Refactor the database layer" --clear-cache
 ```
 
-**9. Disable streaming (troubleshooting)**
-```bash
-agentchanti "Create a hello world app" --no-stream
+---
+
+## Configuration
+
+### Config File (`.agentchanti.yaml`)
+
+AgentChanti looks for a config file in the **current directory** first, then your **home directory**. Settings are resolved in priority order: **CLI args > env vars > YAML config > defaults**.
+
+Create `.agentchanti.yaml` in your project or home directory:
+
+```yaml
+# LLM Settings
+model: "deepseek-coder-v2:16b"
+context_window: 16384
+stream: true
+
+# Provider URLs
+ollama_base_url: "http://localhost:11434/api/generate"
+lm_studio_base_url: "http://localhost:1234/v1"
+
+# Cloud LLM (any OpenAI-compatible API)
+openai:
+  api_key: "sk-your-key-here"
+  base_url: "https://api.openai.com/v1"
+
+# Embeddings
+embedding_model: "nomic-embed-text"
+embedding_top_k: 5
+embedding_cache_dir: ".agentchanti"   # SQLite cache location
+
+# Per-agent model overrides (use different models for different agents)
+models:
+  planner: "deepseek-coder-v2:16b"     # Smarter model for planning
+  coder: "qwen2.5-coder:7b"           # Fast model for coding
+  reviewer: "deepseek-coder-v2:16b"    # Smarter model for reviews
+  tester: "qwen2.5-coder:7b"          # Fast model for tests
+
+# Custom prompt suffixes (append instructions to each agent's prompt)
+prompts:
+  planner_suffix: "Focus on small, incremental steps."
+  coder_suffix: "Always use type hints. Follow PEP 8. Use dataclasses."
+  reviewer_suffix: "Check for SQL injection and XSS vulnerabilities."
+  tester_suffix: "Use pytest fixtures. Aim for 90% coverage."
+
+# Step caching
+step_cache_ttl_hours: 24
+
+# HTML reports
+report_dir: ".agentchanti/reports"
+
+# Plugins (custom step handlers)
+plugins:
+  - my_package.plugins.LintPlugin
+  - my_package.plugins.DeployPlugin
+
+# Other
+llm_max_retries: 3
+llm_retry_delay: 2.0
+checkpoint_file: ".agentchanti_checkpoint.json"
+```
+
+### Environment Variables
+
+All settings can also be set via environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DEFAULT_MODEL` | `deepseek-coder-v2-lite-instruct` | Default model name |
+| `CONTEXT_WINDOW` | `8192` | Model context window size (tokens) |
+| `OLLAMA_BASE_URL` | `http://localhost:11434/api/generate` | Ollama API endpoint |
+| `LM_STUDIO_BASE_URL` | `http://localhost:1234/v1` | LM Studio API endpoint |
+| `OPENAI_API_KEY` | — | API key for OpenAI-compatible providers |
+| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Cloud LLM API base URL |
+| `EMBEDDING_MODEL` | `nomic-embed-text` | Embedding model name |
+| `EMBEDDING_TOP_K` | `5` | Number of files to retrieve for context |
+| `EMBEDDING_CACHE_DIR` | `.agentchanti` | Directory for persistent embedding cache |
+| `REPORT_DIR` | `.agentchanti/reports` | HTML report output directory |
+| `STEP_CACHE_TTL_HOURS` | `24` | Step cache TTL in hours |
+| `LLM_MAX_RETRIES` | `3` | Max retries on LLM failure |
+| `LLM_RETRY_DELAY` | `2.0` | Base delay (seconds) between retries |
+| `STREAM_RESPONSES` | `true` | Enable/disable streaming |
+
+---
+
+## Library API (Programmatic Use)
+
+Use AgentChanti as a Python library for backend integration, CI pipelines, or custom tooling:
+
+```python
+from multi_agent_coder import run_task, TaskResult
+
+result: TaskResult = run_task(
+    task="Create a Python CLI calculator",
+    provider="lm_studio",
+    model="deepseek-coder-v2-lite-instruct",
+    language="python",
+    auto=True,          # Non-interactive
+)
+
+print(f"Success: {result.success}")
+print(f"Files written: {result.files_written}")
+print(f"Plan steps: {result.plan_steps}")
+print(f"Token usage: {result.token_usage}")
+print(f"Log file: {result.log_file}")
+
+if not result.success:
+    print(f"Error: {result.error}")
+```
+
+### `TaskResult` Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `success` | `bool` | Whether the pipeline completed successfully |
+| `files_written` | `list[str]` | Paths of all files created or modified |
+| `plan_steps` | `list[str]` | The executed plan steps |
+| `token_usage` | `dict` | Token counts (`sent`, `recv`, `total`) |
+| `log_file` | `str` | Path to the detailed log file |
+| `error` | `str \| None` | Error message if pipeline failed |
+
+---
+
+## Plugin System
+
+Extend AgentChanti with custom step type handlers. Create a Python class that inherits from `StepPlugin`:
+
+```python
+from multi_agent_coder.plugins import StepPlugin, PluginContext
+
+class LintPlugin(StepPlugin):
+    name = "LINT"
+
+    def can_handle(self, step_text: str) -> bool:
+        return "lint" in step_text.lower() or "format" in step_text.lower()
+
+    def handle(self, step_text: str, ctx: PluginContext) -> tuple[bool, str]:
+        success, output = ctx.executor.run_command("ruff check . --fix")
+        return success, output if not success else ""
+```
+
+Register your plugin in `.agentchanti.yaml`:
+
+```yaml
+plugins:
+  - my_package.plugins.LintPlugin
+```
+
+Or via setuptools entry points:
+
+```toml
+# pyproject.toml
+[project.entry-points."agentchanti.plugins"]
+lint = "my_package.plugins:LintPlugin"
 ```
 
 ---
@@ -309,7 +468,7 @@ agentchanti "Create a hello world app" --no-stream
     Your Task ----->|  Planner  |-----> Step-by-step plan
                     +-----------+
                           |
-                    [User Approval]
+              [Plan Approval / TUI Editor]
                           |
               +-----------+-----------+
               |           |           |
@@ -336,46 +495,29 @@ agentchanti "Create a hello world app" --no-stream
      +------------------+        Run tests
               |                  Fix code if tests fail
          [Checkpoint]            (saved after each step)
+              |
+     +------------------+
+     |   HTML Report    |-----> Self-contained report
+     +------------------+
 ```
 
 ### Execution Flow
 
-1. **Scan** -- Reads your project structure and key files
-2. **Plan** -- Planner agent creates numbered steps with dependency info
-3. **Approve** -- You review the plan (approve / edit / replan)
-4. **Execute** -- Each step is classified (CMD / CODE / TEST / IGNORE) and executed:
+1. **Scan** — Reads your project structure and key files
+2. **Knowledge** — Loads learnings from previous runs (if available)
+3. **Plan** — Planner agent creates numbered steps with dependency info
+4. **Approve** — You review the plan (approve / TUI edit / text edit / replan)
+5. **Execute** — Each step is classified (CMD / CODE / TEST / IGNORE / PLUGIN) and executed:
    - **CMD**: Shell commands (installs, file operations)
-   - **CODE**: Coder writes code -> Reviewer checks -> retry if needed
-   - **TEST**: Tester generates tests -> run them -> Coder fixes failures
+   - **CODE**: Coder writes code → Reviewer checks → retry if needed
+   - **TEST**: Tester generates tests → run them → Coder fixes failures
+   - **PLUGIN**: Custom step handlers (LINT, DEPLOY, etc.)
    - **IGNORE**: Non-actionable steps are skipped
-5. **Diagnose** -- If a step fails after retries, the LLM analyzes why and applies a fix
-6. **Checkpoint** -- Progress is saved after each successful step
-7. **Git** -- On completion, offers to commit; on failure, offers to rollback
-
----
-
-## Configuration
-
-All settings can be overridden via environment variables:
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `OLLAMA_BASE_URL` | `http://localhost:11434/api/generate` | Ollama API endpoint |
-| `LM_STUDIO_BASE_URL` | `http://localhost:1234/v1` | LM Studio API endpoint |
-| `DEFAULT_MODEL` | `deepseek-coder-v2-lite-instruct` | Default model name |
-| `CONTEXT_WINDOW` | `8192` | Model context window size (tokens) |
-| `EMBEDDING_MODEL` | `nomic-embed-text` | Embedding model name |
-| `EMBEDDING_TOP_K` | `5` | Number of files to retrieve for context |
-| `LLM_MAX_RETRIES` | `3` | Max retries on LLM failure |
-| `LLM_RETRY_DELAY` | `2.0` | Base delay (seconds) between retries |
-| `STREAM_RESPONSES` | `true` | Enable/disable streaming |
-| `CHECKPOINT_FILE` | `.agentchanti_checkpoint.json` | Checkpoint file path |
-
-**Example: Use a different Ollama port**
-```bash
-export OLLAMA_BASE_URL="http://localhost:12345/api/generate"
-agentchanti "my task" --provider ollama
-```
+6. **Diagnose** — If a step fails after retries, the LLM analyzes why and applies a fix
+7. **Checkpoint** — Progress is saved after each successful step
+8. **Learn** — Extracts patterns and conventions from the run
+9. **Report** — Generates an HTML report with stats, diffs, and step breakdown
+10. **Git** — On completion, offers to commit; on failure, offers to rollback
 
 ---
 
@@ -385,28 +527,50 @@ agentchanti "my task" --provider ollama
 myagent/
   multi_agent_coder/
     agents/
-      base.py            # Abstract agent base class
-      planner.py         # PlannerAgent -- creates step-by-step plans
-      coder.py           # CoderAgent -- writes source code
-      reviewer.py        # ReviewerAgent -- reviews code quality
-      tester.py          # TesterAgent -- generates unit tests
+      base.py                  # Agent base class with custom prompt suffix support
+      planner.py               # PlannerAgent — creates step-by-step plans
+      coder.py                 # CoderAgent — writes source code
+      reviewer.py              # ReviewerAgent — reviews code quality
+      tester.py                # TesterAgent — generates unit tests
     llm/
-      base.py            # LLMClient base with retry + streaming
-      ollama.py          # Ollama HTTP client
-      lm_studio.py       # LM Studio (OpenAI-compatible) client
-    orchestrator.py      # Main pipeline: plan -> execute -> diagnose
-    executor.py          # File I/O, command execution, plan parsing
-    cli_display.py       # Terminal UI, progress bars, token tracking
-    config.py            # Environment-based configuration
-    language.py          # Language detection + test framework mapping
-    project_scanner.py   # Scans existing projects for planner context
-    checkpoint.py        # Save/restore pipeline state for resume
-    git_utils.py         # Git checkpoint branches, commit, rollback
-    embedding_store.py   # In-memory vector store with cosine similarity
-  setup.py               # Package configuration
-  install.sh             # Linux/macOS installer
-  install.bat            # Windows installer
-  README.md              # You are here
+      base.py                  # LLMClient base with retry + streaming
+      ollama.py                # Ollama HTTP client
+      lm_studio.py             # LM Studio (OpenAI-compatible) client
+      openai_client.py         # Cloud LLM client (any OpenAI-compatible API)
+    orchestrator/
+      __init__.py              # Package init with backward-compatible exports
+      cli.py                   # CLI entry point with argparse
+      memory.py                # FileMemory — thread-safe file tracking
+      classification.py        # Step classification (CMD/CODE/TEST/IGNORE)
+      step_handlers.py         # Step execution handlers
+      diagnosis.py             # Failure diagnosis and fix application
+      pipeline.py              # Wave-based parallel/sequential execution
+    plugins/
+      __init__.py              # StepPlugin base class + PluginContext
+      registry.py              # Plugin discovery (config + entry points)
+    executor.py                # File I/O, command execution, plan parsing
+    cli_display.py             # Terminal UI, progress bars, token tracking
+    config.py                  # YAML config + env vars + defaults
+    api.py                     # Library API: run_task() + TaskResult
+    diff_display.py            # Colored diff preview before file writes
+    embedding_store.py         # In-memory vector store
+    embedding_store_sqlite.py  # Persistent SQLite-backed vector store
+    step_cache.py              # Hash-based LLM response cache with TTL
+    knowledge.py               # Cross-run project knowledge base
+    report.py                  # HTML report generator
+    tui_editor.py              # Curses-based interactive plan editor
+    language.py                # Language detection + test framework mapping
+    project_scanner.py         # Project scanner for planner context
+    checkpoint.py              # Save/restore pipeline state for resume
+    git_utils.py               # Git checkpoint, commit, rollback
+    __init__.py                # Public API exports (run_task, TaskResult)
+  tests/
+    test_flow.py               # Core agent flow tests
+    test_embeddings.py         # Embedding store + FileMemory tests
+  setup.py                     # Package configuration
+  install.sh                   # Linux/macOS installer
+  install.bat                  # Windows installer
+  README.md                    # You are here
 ```
 
 ---
@@ -426,7 +590,7 @@ ollama serve
 
 ### Streaming errors / socket timeouts
 
-Some models or server versions don't handle streaming well. Disable it:
+Some models or server versions don't handle streaming well:
 ```bash
 agentchanti "your task" --no-stream
 ```
@@ -435,34 +599,44 @@ agentchanti "your task" --no-stream
 
 The model may be too small for the task, or the context window is overflowing. Try:
 - A larger model
-- Increasing `CONTEXT_WINDOW` environment variable
+- Increasing `context_window` in `.agentchanti.yaml`
 - Using `--no-embeddings` to reduce context size
 
-### LM Studio: model not responding
+### OpenAI provider: authentication errors
 
-Make sure:
-1. A model is **loaded** (selected in the dropdown, not just downloaded)
-2. The server shows **Running** (green)
-3. The port matches (default: `1234`)
+Make sure your API key is set:
+```bash
+export OPENAI_API_KEY="sk-your-key-here"
+# Or add it to .agentchanti.yaml under openai.api_key
+```
 
 ### Plan has too many / wrong steps
 
-Use the plan approval prompt to fix it:
-- Press `R` to replan (generates a new plan)
-- Press `E` then enter step numbers to remove (e.g., `E 3,5,7`)
+Use the plan approval prompt:
+- Press `A` to approve the plan as-is
+- Press `E` to open the **TUI editor** (reorder, edit, delete steps interactively)
+- Press `T` to open a **text editor** (notepad on Windows, vi on Linux/macOS)
+- Press `R` to request a completely new plan
 
 ### Resuming a failed run
 
-If AgentChanti was interrupted or a step failed:
 ```bash
-# Same task -- it will detect the checkpoint and ask to resume
+# Same task — detects checkpoint and asks to resume
 agentchanti "same task description"
 
-# Or force resume
+# Force resume
 agentchanti "same task" --resume
 
-# Or start completely fresh (ignores checkpoint)
+# Start completely fresh
 agentchanti "same task" --fresh
+```
+
+### Cache issues (stale results)
+
+If source files changed but cached results seem stale:
+```bash
+agentchanti "task" --clear-cache     # Clear cache before running
+agentchanti "task" --no-cache        # Disable caching entirely
 ```
 
 ---
@@ -480,8 +654,8 @@ AgentChanti auto-detects your project's language and adapts accordingly:
 | Rust | cargo test | `.rs` files, keywords: cargo, tokio |
 | Java | Maven (mvn test) | `.java` files, keywords: spring, maven |
 | Ruby | RSpec | `.rb` files, keywords: rails, sinatra |
-| C++ | -- | `.cpp`/`.hpp` files |
-| C# | -- | `.cs` files, keywords: dotnet |
+| C++ | — | `.cpp`/`.hpp` files |
+| C# | — | `.cs` files, keywords: dotnet |
 
 Override with `--language`:
 ```bash
@@ -497,9 +671,13 @@ Contributions are welcome! Feel free to open issues or submit pull requests.
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/my-feature`)
 3. Make your changes
-4. Run the syntax check: `python -c "import ast; ast.parse(open('multi_agent_coder/orchestrator.py').read())"`
+4. Run the tests: `python -m pytest tests/ -v`
 5. Commit and push
 6. Open a pull request
+
+### Creating Plugins
+
+See the [Plugin System](#plugin-system) section above. You can distribute plugins as pip-installable packages with `agentchanti.plugins` entry points.
 
 ---
 
@@ -509,10 +687,8 @@ This project is licensed under the MIT License. See [LICENSE](LICENSE) for detai
 
 ---
 
----
-
 ## Disclaimer
 
-> **This is a personal project by [Uday Kanth](https://github.com/udaykanth-rapeti).** It is not affiliated with, endorsed by, sponsored by, or in any way officially connected with my current or past employer(s), or any of their subsidiaries, clients, or affiliates. All opinions, code, and design decisions in this project are my own and do not represent the views or intellectual property of any organization I am or have been associated with. This project was built entirely on my own time using my own resources.
+> **This is a personal project by [Uday Kanth](https://github.com/udaykanthr).** It is not affiliated with, endorsed by, sponsored by, or in any way officially connected with my current or past employer(s), or any of their subsidiaries, clients, or affiliates. All opinions, code, and design decisions in this project are my own and do not represent the views or intellectual property of any organization I am or have been associated with. This project was built entirely on my own time using my own resources.
 
 ---

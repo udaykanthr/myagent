@@ -2,11 +2,13 @@ from abc import ABC, abstractmethod
 from ..llm.base import LLMClient
 
 class Agent(ABC):
-    def __init__(self, name: str, role: str, goal: str, llm_client: LLMClient):
+    def __init__(self, name: str, role: str, goal: str, llm_client: LLMClient,
+                 prompt_suffix: str = ""):
         self.name = name
         self.role = role
         self.goal = goal
         self.llm_client = llm_client
+        self.prompt_suffix = prompt_suffix
 
     @abstractmethod
     def process(self, task: str, context: str = "") -> str:
@@ -20,6 +22,8 @@ class Agent(ABC):
         if language:
             from ..language import get_language_name
             prompt += f"Language: {get_language_name(language)}\n\n"
+        if self.prompt_suffix:
+            prompt += f"Instructions: {self.prompt_suffix}\n\n"
         if context:
             prompt += f"Context: {context}\n\n"
         prompt += f"Task: {task}\n\nResponse:"

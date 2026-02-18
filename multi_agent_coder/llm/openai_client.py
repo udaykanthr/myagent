@@ -53,6 +53,7 @@ class OpenAIClient(LLMClient):
         token_tracker.record(
             prompt_tokens if isinstance(prompt_tokens, int) else est_tokens,
             completion_tokens if isinstance(completion_tokens, int) else 0,
+            model_name=self.model
         )
         log.debug(f"[OpenAI] Usage: prompt={prompt_tokens} completion={completion_tokens}")
 
@@ -104,7 +105,7 @@ class OpenAIClient(LLMClient):
                     continue
 
         result = "".join(content_parts)
-        token_tracker.record(est_tokens, tokens_generated)
+        token_tracker.record(est_tokens, tokens_generated, model_name=self.model)
         log.debug(f"[OpenAI] Streamed {tokens_generated} tokens")
         log.debug(f"[OpenAI] Response:\n{result}")
 

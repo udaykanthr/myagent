@@ -19,22 +19,20 @@ Provide a step-by-step plan as a numbered list.
 Keep each step short and actionable. Do NOT include code in this plan.
 
 IMPORTANT RULES:
-- Base your plan ONLY on what actually exists in the project (see context above).
-- Do NOT assume files exist unless they are listed in the project context.
-- Do NOT include steps to install from requirements.txt or package.json unless those files are confirmed to exist.
-- Do NOT add unnecessary setup steps. Focus on what the task actually needs.
+- Base your plan ONLY on the project context provided above.
+- Do NOT add meta-steps like "Review code", "Identify issues", "Analyze project structure", or "List files".
+- The project context is already provided to you; go straight to implementation or modification steps.
+- Combine "Identify" and "Fix" into a single actionable step (e.g., "Fix the logic in X" instead of "Identify bug in X" followed by "Fix bug in X").
 - Each step should produce a concrete, verifiable result.
+- For steps that involve running shell commands (installing packages, running scripts, etc.), include the exact command in backticks.
 
-For steps that involve running shell commands (scanning files, listing directories,
-installing packages, etc.), include the exact command in backticks, e.g.:
-{_shell_example()}
-  2. Install a specific package with `pip install pytest`
+Example:
+  1. Create a new utility function in `utils.py` for input validation
+  2. Update the API endpoint in `app.py` to use the new validation (depends: 1)
+  3. Create unit tests for the validation logic in `tests/test_utils.py` (depends: 1)
+  4. Run tests with `pytest` (depends: 3)
 
 For each step, if it depends on a previous step being completed first, add (depends: N) or (depends: N, M) at the end of the step.
 Steps with no dependencies can run in parallel.
-Example:
-  1. Create the data model
-  2. Create the API endpoints (depends: 1)
-  3. Write unit tests (depends: 1, 2)
 """
         return self.llm_client.generate_response(prompt)

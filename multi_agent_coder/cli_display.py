@@ -11,24 +11,43 @@ from datetime import datetime
 
 
 class TokenTracker:
-    """Global tracker for token usage across all LLM calls."""
+    """Global tracker for token usage and cost across all LLM calls."""
 
-    def __init__(self):
+    def __init__(self, pricing: dict | None = None):
         self.total_prompt_tokens = 0
         self.total_completion_tokens = 0
+        self.total_cost = 0.0
         self.call_count = 0
+        self.pricing = pricing or {}
 
-    def record(self, prompt_tokens: int, completion_tokens: int):
+    def record(self, prompt_tokens: int, completion_tokens: int, model_name: str | None = None):
         self.total_prompt_tokens += prompt_tokens
         self.total_completion_tokens += completion_tokens
         self.call_count += 1
+        
+        if model_name:
+            self._calculate_cost(model_name, prompt_tokens, completion_tokens)
+
+    def _calculate_cost(self, model_name: str, prompt: int, completion: int):
+        # Simple match or regex match for pricing
+        price_entry = None
+        for pattern, prices in self.pricing.items():
+            if pattern in model_name.lower():
+                price_entry = prices
+                break
+        
+        if price_entry:
+            # Pricing is per 1M tokens
+            cost = (prompt * price_entry["input"] / 1_000_000) + \
+                   (completion * price_entry["output"] / 1_000_000)
+            self.total_cost += cost
 
     @property
     def total_tokens(self):
         return self.total_prompt_tokens + self.total_completion_tokens
 
 
-# Global singleton
+# Global singleton (pricing will be injected during CLI init)
 token_tracker = TokenTracker()
 
 
@@ -106,12 +125,15 @@ class CLIDisplay:
 
     def _token_summary(self) -> str:
         t = token_tracker
-        return (
+        summary = (
             f"Tokens  ↑ sent: {t.total_prompt_tokens}  "
             f"↓ recv: {t.total_completion_tokens}  "
             f"Σ total: {t.total_tokens}  "
             f"({t.call_count} calls)"
         )
+        if t.total_cost > 0:
+            summary += f"  💰 Cost: ${t.total_cost:.4f}"
+        return summary
 
     def _build_step_lines(self) -> list[str]:
         """Build the step list lines for bottom section."""
@@ -258,10 +280,25 @@ class CLIDisplay:
     def finish(self, success: bool = True):
         self._move_to(self.term_height - 1)
         if success:
-            print(self._center("✔  All steps processed successfully!"))
+            msg = "✔  All steps processed successfully!"
+            if token_tracker.total_cost > 0:
+                msg += f" (Total Cost: ${token_tracker.total_cost:.4f})"
+            print(self._center(msg))
         else:
             print(self._center("✘  Some steps failed. Check logs for details."))
         print()
+
+    def budget_check(self, limit: float) -> bool:
+        """Check if total cost exceeds limit. Returns True if over budget."""
+        if limit > 0 and token_tracker.total_cost >= limit:
+            with self._render_lock:
+                self._move_to(self.term_height - 2)
+                RED = "\033[31m"
+                RESET = "\033[0m"
+                msg = f"⚠  BUDGET EXCEEDED ($ {token_tracker.total_cost:.4f} >= ${limit:.2f})  ⚠"
+                print(f"{RED}{self._center(msg)}{RESET}")
+            return True
+        return False
 
     # ── Interactive prompts (temporarily exit full-screen mode) ──
 

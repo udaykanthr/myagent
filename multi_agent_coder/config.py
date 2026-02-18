@@ -30,6 +30,19 @@ _DEFAULTS = {
     "report_dir": ".agentchanti/reports",
     "step_cache_ttl_hours": 24,
     "plugins": [],
+    "planner_suffix": "Do not create meta-steps (e.g., 'Review code', 'Identify issues'). Focus on implementation. Combine analysis and action.",
+    "budget_limit": 0.0,
+    "pricing": {
+        "gpt-4o": {"input": 2.50, "output": 10.00},
+        "gpt-4o-mini": {"input": 0.15, "output": 0.60},
+        "gpt-4-turbo": {"input": 10.00, "output": 30.00},
+        "gpt-4": {"input": 30.00, "output": 60.00},
+        "gpt-3.5-turbo": {"input": 0.50, "output": 1.50},
+        "claude-3-5-sonnet": {"input": 3.00, "output": 15.00},
+        "claude-3-opus": {"input": 15.00, "output": 75.00},
+        "claude-3-haiku": {"input": 0.25, "output": 1.25},
+        "deepseek-coder": {"input": 0.14, "output": 0.28},
+    }
 }
 
 # Config file search locations
@@ -97,6 +110,7 @@ class Config:
                 return bool(yaml_val)
             return default
 
+        self.PROVIDER = _get("PROVIDER", "provider", _DEFAULTS["provider"])
         self.DEFAULT_MODEL = _get("DEFAULT_MODEL", "model", _DEFAULTS["model"])
         self.CONTEXT_WINDOW = _get("CONTEXT_WINDOW", "context_window",
                                    _DEFAULTS["context_window"], cast=int)
@@ -141,8 +155,12 @@ class Config:
         if isinstance(prompts_section, dict):
             for key in ("planner_suffix", "coder_suffix",
                         "reviewer_suffix", "tester_suffix"):
-                if key in prompts_section:
-                    self.PROMPT_SUFFIXES[key] = str(prompts_section[key])
+                val = prompts_section.get(key)
+                if val is not None:
+                    self.PROMPT_SUFFIXES[key] = str(val)
+                elif key in _DEFAULTS:
+                    # Load from defaults if not in YAML
+                    self.PROMPT_SUFFIXES[key] = _DEFAULTS[key]
 
         # Persistent embedding cache
         self.EMBEDDING_CACHE_DIR = _get("EMBEDDING_CACHE_DIR",
@@ -159,10 +177,53 @@ class Config:
                                          _DEFAULTS["step_cache_ttl_hours"],
                                          cast=int)
 
+        # Budget and Pricing
+        self.BUDGET_LIMIT = _get("BUDGET_LIMIT", "budget_limit",
+                                 _DEFAULTS["budget_limit"], cast=float)
+        self.PRICING = yd.get("pricing", _DEFAULTS["pricing"])
+        if not isinstance(self.PRICING, dict):
+            self.PRICING = _DEFAULTS["pricing"]
+
         # Plugins
         self.PLUGINS: list[str] = yd.get("plugins", _DEFAULTS["plugins"])
         if not isinstance(self.PLUGINS, list):
             self.PLUGINS = []
+
+    def to_dict(self) -> dict:
+        """Return the current configuration as a dictionary."""
+        return {
+            "provider": self.PROVIDER,
+            "model": self.DEFAULT_MODEL,
+            "context_window": self.CONTEXT_WINDOW,
+            "embedding_model": self.EMBEDDING_MODEL,
+            "embedding_top_k": self.EMBEDDING_TOP_K,
+            "stream": self.STREAM_RESPONSES,
+            "llm_max_retries": self.LLM_MAX_RETRIES,
+            "llm_retry_delay": self.LLM_RETRY_DELAY,
+            "checkpoint_file": self.CHECKPOINT_FILE,
+            "ollama_base_url": self.OLLAMA_BASE_URL,
+            "lm_studio_base_url": self.LM_STUDIO_BASE_URL,
+            "openai": {
+                "api_key": self.OPENAI_API_KEY,
+                "base_url": self.OPENAI_BASE_URL,
+            },
+            "models": self._agent_models,
+            "prompts": self.PROMPT_SUFFIXES,
+            "embedding_cache_dir": self.EMBEDDING_CACHE_DIR,
+            "report_dir": self.REPORT_DIR,
+            "step_cache_ttl_hours": self.STEP_CACHE_TTL_HOURS,
+            "plugins": self.PLUGINS,
+            "budget_limit": self.BUDGET_LIMIT,
+            "pricing": self.PRICING,
+        }
+
+    def to_yaml(self) -> str:
+        """Return the current configuration as a YAML string."""
+        if yaml is None:
+            # Fallback if yaml is not installed
+            import json
+            return json.dumps(self.to_dict(), indent=2)
+        return yaml.dump(self.to_dict(), sort_keys=False, default_flow_style=False)
 
     def get_agent_model(self, agent_name: str) -> str | None:
         """Return the per-agent model override, or None to use the default."""

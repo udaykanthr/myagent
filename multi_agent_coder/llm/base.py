@@ -45,7 +45,11 @@ class LLMClient(ABC):
                     log.warning(
                         f"[LLM] Empty response on attempt {attempt}/{self.max_retries}")
                     if attempt < self.max_retries:
-                        time.sleep(self.retry_delay * attempt)
+                        # Jittered exponential backoff
+                        import random
+                        wait = self.retry_delay * (2 ** (attempt - 1))
+                        jitter = wait * 0.1 * random.random()
+                        time.sleep(wait + jitter)
                         continue
                     raise LLMError("LLM returned empty response after all retries")
 
@@ -57,12 +61,24 @@ class LLMClient(ABC):
                 last_error = e
                 log.warning(
                     f"[LLM] Error on attempt {attempt}/{self.max_retries}: {e}")
+                
                 # If streaming failed, fall back to non-streaming for next retry
                 if use_stream:
                     log.warning("[LLM] Streaming failed — falling back to non-streaming")
                     use_stream = False
+                
                 if attempt < self.max_retries:
-                    time.sleep(self.retry_delay * attempt)
+                    # Jittered exponential backoff
+                    import random
+                    wait = self.retry_delay * (2 ** (attempt - 1))
+                    jitter = wait * 0.1 * random.random()
+                    
+                    # Special handling for 429: wait longer
+                    if "429" in str(e):
+                        wait *= 2
+                        log.info(f"[LLM] Rate limit detected (429). Backing off for {wait:.1f}s")
+                    
+                    time.sleep(wait + jitter)
 
         raise LLMError(
             f"LLM failed after {self.max_retries} retries: {last_error}")

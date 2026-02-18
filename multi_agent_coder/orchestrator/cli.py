@@ -35,7 +35,7 @@ from .pipeline import build_step_waves, _execute_step, _run_diagnosis_loop
 
 def main():
     parser = argparse.ArgumentParser(description="AgentChanti — Multi-Agent Local Coder")
-    parser.add_argument("task", help="The coding task to perform")
+    parser.add_argument("task", nargs="?", help="The coding task to perform")
     parser.add_argument("--provider", choices=["ollama", "lm_studio", "openai"],
                         default="lm_studio", help="The LLM provider to use")
     parser.add_argument("--model", default=None,
@@ -71,6 +71,8 @@ def main():
                          help="Generate HTML report after run (default: on)")
     parser.add_argument("--no-report", action="store_true",
                          help="Disable HTML report generation")
+    parser.add_argument("--generate-config", "--generate-yaml", action="store_true",
+                         help="Generate a .agentchanti.yaml file with current settings and exit")
     args = parser.parse_args()
 
     # ── 0. Load config ──
@@ -79,6 +81,32 @@ def main():
     # CLI overrides
     model = args.model or cfg.DEFAULT_MODEL
     embed_model = args.embed_model or cfg.EMBEDDING_MODEL
+
+    # Update config object with CLI overrides (for --generate-yaml)
+    if args.provider:
+        cfg.PROVIDER = args.provider # Note: config doesn't actually store PROVIDER yet, but let's update what we can
+    if args.model:
+        cfg.DEFAULT_MODEL = args.model
+    if args.embed_model:
+        cfg.EMBEDDING_MODEL = args.embed_model
+    if args.no_embeddings:
+        cfg.NO_EMBEDDINGS = True
+    if args.language:
+        cfg.LANGUAGE = args.language
+    if args.no_stream:
+        cfg.STREAM_RESPONSES = False
+
+    # ── 0.5. Generate YAML and exit ──
+    if args.generate_config:
+        yaml_content = cfg.to_yaml()
+        with open(".agentchanti.yaml", "w", encoding="utf-8") as f:
+            f.write(yaml_content)
+        print("\n  ✨ Generated .agentchanti.yaml with current settings.\n")
+        return
+
+    if not args.task:
+        parser.print_help()
+        return
 
     # ── 1. Detect language ──
     if args.language:
@@ -95,7 +123,7 @@ def main():
         stream=stream_enabled,
     )
 
-    provider = args.provider
+    provider = args.provider or cfg.PROVIDER
     if provider == "ollama":
         llm_client = OllamaClient(
             base_url=cfg.OLLAMA_BASE_URL, model=model, **llm_kwargs)
@@ -206,7 +234,11 @@ def main():
     executor = Executor()
 
     # ── 6. Init display ──
-    display = CLIDisplay(args.task)
+    display = CLIDisplay(args.task or "Config Generation")
+    
+    # Inject pricing into tracker
+    token_tracker.pricing = cfg.PRICING
+    
     log.info(f"Task: {args.task}")
     log.info(f"Provider: {provider}, Model: {model}")
 
@@ -351,6 +383,12 @@ def main():
                 step_results[idx] = "done"
                 save_checkpoint(checkpoint_file, args.task, steps, idx,
                                 memory.as_dict(), step_results, language)
+                
+                # Budget check after step
+                if display.budget_check(cfg.BUDGET_LIMIT):
+                    log.error(f"Budget exceeded (${token_tracker.total_cost:.4f}). Halting.")
+                    pipeline_success = False
+                    break
             else:
                 # Diagnosis loop
                 fixed = _run_diagnosis_loop(
@@ -364,6 +402,12 @@ def main():
                     step_results[idx] = "done"
                     save_checkpoint(checkpoint_file, args.task, steps, idx,
                                     memory.as_dict(), step_results, language)
+                    
+                    # Budget check after fix
+                    if display.budget_check(cfg.BUDGET_LIMIT):
+                        log.error(f"Budget exceeded (${token_tracker.total_cost:.4f}). Halting.")
+                        pipeline_success = False
+                        break
                 else:
                     pipeline_success = False
                     break
@@ -391,6 +435,12 @@ def main():
                     else:
                         failed_steps.append((idx, error_info))
 
+                # Budget check after wave
+                if display.budget_check(cfg.BUDGET_LIMIT):
+                    log.error(f"Budget exceeded (${token_tracker.total_cost:.4f}) after parallel wave. Halting.")
+                    pipeline_success = False
+                    break
+
             # Save checkpoint for completed steps
             max_completed = max(
                 (i for i in step_results if step_results[i] == "done"),
@@ -412,6 +462,12 @@ def main():
                     step_results[idx] = "done"
                     save_checkpoint(checkpoint_file, args.task, steps, idx,
                                     memory.as_dict(), step_results, language)
+                    
+                    # Budget check after fix
+                    if display.budget_check(cfg.BUDGET_LIMIT):
+                        log.error(f"Budget exceeded (${token_tracker.total_cost:.4f}). Halting.")
+                        pipeline_success = False
+                        break
                 else:
                     pipeline_success = False
                     break
@@ -442,6 +498,7 @@ def main():
                     "sent": token_tracker.total_prompt_tokens,
                     "recv": token_tracker.total_completion_tokens,
                     "total": token_tracker.total_tokens,
+                    "cost": token_tracker.total_cost,
                 }
                 report_path = generate_html_report(
                     args.task, step_reports, token_usage,

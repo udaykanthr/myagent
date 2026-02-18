@@ -189,6 +189,10 @@ def generate_html_report(
       <div class="stat-value">{total_recv:,}</div>
       <div class="stat-label">Received</div>
     </div>
+    {f'''<div class="stat">
+      <div class="stat-value" style="color: var(--accent);">${token_usage.get("cost", 0.0):.4f}</div>
+      <div class="stat-label">Total Cost</div>
+    </div>''' if token_usage.get("cost", 0) > 0 else ""}
   </div>
 
   <h2 style="margin-bottom: 1rem; font-size: 1.1rem;">Steps</h2>

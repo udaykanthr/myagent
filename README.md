@@ -54,6 +54,9 @@ The agents collaborate in a pipeline with built-in retry loops, automatic failur
 - **Step-Level Caching** — Hashes step inputs and caches LLM responses. Re-running the same task skips completed steps instantly. Configurable TTL (default: 24h).
 - **Custom Agent Prompts** — Override or extend agent behavior via `.agentchanti.yaml` config (coding conventions, review criteria, etc.)
 - **Plugin System** — Extend with custom step types (DEPLOY, LINT, DOCS, etc.) via Python classes.
+- **Cloud LLM (OpenAI-compatible)** — High-performance coding with **GPT-4o**, **Claude 3.5**, or **DeepSeek**.
+- **TUI Plan Editor** — Interactively edit, add, or reorder steps before execution starts.
+- **Cost Tracking & Budgets** — Monitor cloud API spending and set hard limits.
 
 ### Developer Experience
 - **TUI Plan Editor** — Interactive curses-based plan editor with arrow-key navigation, reordering, inline editing, and step deletion. Falls back to text editor on unsupported terminals.
@@ -259,6 +262,7 @@ agentchanti "<task description>" [options]
 | `--resume` | Force resume from last checkpoint | off |
 | `--fresh` | Ignore any existing checkpoint and start fresh | off |
 | `--auto` | Non-interactive mode: auto-approve plan, skip all prompts | off |
+| `--generate-yaml` | Generate a `.agentchanti.yaml` file with current settings and exit | off |
 
 ### Examples
 
@@ -304,10 +308,36 @@ agentchanti "Generate unit tests for all modules" --auto --no-git --no-report
 agentchanti "Refactor the database layer" --clear-cache
 ```
 
+**9. Generate a configuration file**
+```bash
+agentchanti --generate-yaml
+# Creates .agentchanti.yaml with defaults
+
+agentchanti --provider openai --model gpt-4o-mini --generate-yaml
+# Creates .agentchanti.yaml with specific provider/model setup
+```
+
 ---
 
 ## Configuration
 
+AgentChanti is highly configurable. It looks for `.agentchanti.yaml` in your project root, or `~/.agentchanti.yaml` for global settings.
+
+```yaml
+# General
+provider: "lm_studio"
+model: "deepseek-coder-v2-lite-instruct"
+budget_limit: 5.0  # Halt if cost exceeds $5.00
+
+# Cloud Setup
+openai:
+  api_key: "sk-..."
+  base_url: "https://api.openai.com/v1"
+
+# Custom Pricing (per 1M tokens)
+pricing:
+  gpt-4o: {input: 2.50, output: 10.00}
+```
 ### Config File (`.agentchanti.yaml`)
 
 AgentChanti looks for a config file in the **current directory** first, then your **home directory**. Settings are resolved in priority order: **CLI args > env vars > YAML config > defaults**.

@@ -205,7 +205,7 @@ def _run_task_impl(
                 llm_client=llm_client, executor=executor,
                 coder=coder, reviewer=reviewer, tester=tester,
                 task=task, memory=memory, display=display,
-                language=language,
+                language=language, auto=auto,
             )
 
             if success:
@@ -218,7 +218,7 @@ def _run_task_impl(
                     llm_client=llm_client, executor=executor,
                     coder=coder, reviewer=reviewer, tester=tester,
                     task=task, memory=memory, display=display,
-                    language=language,
+                    language=language, auto=auto,
                 )
                 if fixed:
                     step_results[idx] = "done"

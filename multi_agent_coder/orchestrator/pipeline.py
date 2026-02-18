@@ -47,7 +47,8 @@ def build_step_waves(steps: list[str], dependencies: dict[int, set[int]]) -> lis
 def _execute_step(step_idx: int, step_text: str, *,
                   llm_client, executor, coder, reviewer, tester,
                   task: str, memory: FileMemory, display: CLIDisplay,
-                  language: str | None, cfg=None) -> tuple[int, bool, str]:
+                  language: str | None, cfg=None,
+                  auto: bool = False) -> tuple[int, bool, str]:
     """Execute a single step. Returns ``(step_idx, success, error_info)``.
 
     Catches all exceptions so that a crash inside any handler never
@@ -78,13 +79,15 @@ def _execute_step(step_idx: int, step_text: str, *,
         elif step_type == "CODE":
             success, error_info = _handle_code_step(
                 step_text, coder, reviewer, executor,
-                task, memory, display, step_idx, language=language, cfg=cfg)
+                task, memory, display, step_idx, language=language, cfg=cfg,
+                auto=auto)
             display.complete_step(step_idx, "done" if success else "failed")
 
         elif step_type == "TEST":
             success, error_info = _handle_test_step(
                 step_text, tester, coder, reviewer, executor,
-                task, memory, display, step_idx, language=language)
+                task, memory, display, step_idx, language=language,
+                auto=auto)
             display.complete_step(step_idx, "done" if success else "failed")
 
         else:
@@ -103,7 +106,8 @@ def _execute_step(step_idx: int, step_text: str, *,
 def _run_diagnosis_loop(step_idx: int, step_text: str, error_info: str, *,
                         llm_client, executor, coder, reviewer, tester,
                         task: str, memory: FileMemory, display: CLIDisplay,
-                        language: str | None, cfg=None) -> bool:
+                        language: str | None, cfg=None,
+                        auto: bool = False) -> bool:
     """Run diagnose → fix → retry loop. Returns ``True`` if the step was fixed.
 
     All exceptions are caught so that a crash during diagnosis (e.g. an
@@ -137,7 +141,7 @@ def _run_diagnosis_loop(step_idx: int, step_text: str, error_info: str, *,
                 llm_client=llm_client, executor=executor,
                 coder=coder, reviewer=reviewer, tester=tester,
                 task=task, memory=memory, display=display,
-                language=language, cfg=cfg,
+                language=language, cfg=cfg, auto=auto,
             )
 
             if success:

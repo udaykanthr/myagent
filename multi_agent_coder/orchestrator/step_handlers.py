@@ -16,7 +16,7 @@ from ..language import get_code_block_lang, get_test_framework
 from .memory import FileMemory
 from .classification import _extract_command_from_step
 
-from ..diff_display import show_diffs
+from ..diff_display import show_diffs, prompt_diff_approval
 
 
 MAX_STEP_RETRIES = 3
@@ -198,7 +198,8 @@ def _handle_code_step(step_text: str, coder: CoderAgent, reviewer: ReviewerAgent
                       executor: Executor, task: str, memory: FileMemory,
                       display: CLIDisplay, step_idx: int,
                       language: str | None = None,
-                      cfg: Config | None = None) -> tuple[bool, str]:
+                      cfg: Config | None = None,
+                      auto: bool = False) -> tuple[bool, str]:
     feedback = ""
     context_window = cfg.CONTEXT_WINDOW if cfg else 8192
     ctx_budget = int(context_window * 0.8)
@@ -230,8 +231,13 @@ def _handle_code_step(step_text: str, coder: CoderAgent, reviewer: ReviewerAgent
             log.warning(f"Step {step_idx+1}: No files parsed from coder response.")
             continue
 
-        # Show diffs before writing
-        show_diffs(files)
+        # Show diffs and wait for approval before writing
+        approved = prompt_diff_approval(files, auto=auto)
+        if not approved:
+            feedback = "User rejected the changes. Try a different approach."
+            display.step_info(step_idx, "Changes rejected by user, retrying...")
+            log.info(f"Step {step_idx+1}: User rejected diff, retrying.")
+            continue
 
         written = executor.write_files(files)
         memory.update(files)
@@ -304,7 +310,8 @@ def _handle_test_step(step_text: str, tester: TesterAgent, coder: CoderAgent,
                       reviewer: ReviewerAgent, executor: Executor,
                       task: str, memory: FileMemory,
                       display: CLIDisplay, step_idx: int,
-                      language: str | None = None) -> tuple[bool, str]:
+                      language: str | None = None,
+                      auto: bool = False) -> tuple[bool, str]:
     lang_tag = get_code_block_lang(language) if language else "python"
     test_cmd = get_test_framework(language)["command"] if language else "pytest"
 
@@ -391,8 +398,13 @@ def _handle_test_step(step_text: str, tester: TesterAgent, coder: CoderAgent,
             display.step_info(step_idx, "Test review found issues, regenerating...")
             continue
 
-        # Show diffs before writing test files
-        show_diffs(test_files)
+        # Show diffs and wait for approval before writing test files
+        approved = prompt_diff_approval(test_files, auto=auto)
+        if not approved:
+            feedback = "User rejected the test changes. Try a different approach."
+            display.step_info(step_idx, "Test changes rejected by user, retrying...")
+            log.info(f"Step {step_idx+1}: User rejected test diff, retrying.")
+            continue
 
         written = executor.write_files(test_files)
         memory.update(test_files)

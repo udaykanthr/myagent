@@ -376,14 +376,14 @@ def main():
                 llm_client=llm_client, executor=executor,
                 coder=coder, reviewer=reviewer, tester=tester,
                 task=args.task, memory=memory, display=display,
-                language=language, cfg=cfg,
+                language=language, cfg=cfg, auto=args.auto,
             )
 
             if success:
                 step_results[idx] = "done"
                 save_checkpoint(checkpoint_file, args.task, steps, idx,
                                 memory.as_dict(), step_results, language)
-                
+
                 # Budget check after step
                 if display.budget_check(cfg.BUDGET_LIMIT):
                     log.error(f"Budget exceeded (${token_tracker.total_cost:.4f}). Halting.")
@@ -396,7 +396,7 @@ def main():
                     llm_client=llm_client, executor=executor,
                     coder=coder, reviewer=reviewer, tester=tester,
                     task=args.task, memory=memory, display=display,
-                    language=language, cfg=cfg,
+                    language=language, cfg=cfg, auto=args.auto,
                 )
                 if fixed:
                     step_results[idx] = "done"
@@ -424,7 +424,7 @@ def main():
                         llm_client=llm_client, executor=executor,
                         coder=coder, reviewer=reviewer, tester=tester,
                         task=args.task, memory=memory, display=display,
-                        language=language, cfg=cfg,
+                        language=language, cfg=cfg, auto=args.auto,
                     )
                     futures[f] = idx
 
@@ -456,7 +456,7 @@ def main():
                     llm_client=llm_client, executor=executor,
                     coder=coder, reviewer=reviewer, tester=tester,
                     task=args.task, memory=memory, display=display,
-                    language=language, cfg=cfg,
+                    language=language, cfg=cfg, auto=args.auto,
                 )
                 if fixed:
                     step_results[idx] = "done"

@@ -1,9 +1,10 @@
 """
-TUI Plan Editor — curses-based interactive plan editing.
+TUI Plan Editor — Textual-based interactive plan editing.
 
-Provides arrow-key navigation, inline editing, reordering, and
-step deletion. Falls back to a lightweight ANSI-based editor
-if curses is unavailable (common on Windows).
+Provides a modern, robust GUI-like experience in the terminal with
+clickable buttons, inline editing, and step reordering.
+
+Falls back to a lightweight ANSI menu editor if Textual is not installed.
 """
 
 from __future__ import annotations
@@ -14,21 +15,18 @@ import os
 def launch_tui_editor(steps: list[str]) -> list[str] | None:
     """Launch the TUI plan editor.
 
-    Returns the edited steps list, or None if:
-    - The user cancelled (pressed 'q')
-    - Both curses and ANSI editors fail
+    Returns the edited steps list, or None if the user cancelled.
     """
-    # Try curses first (works on Linux/macOS)
+    # Try Textual first (modern, robust, works everywhere)
     try:
-        import curses
-        editor = PlanEditorTUI(steps)
-        return curses.wrapper(editor._main_loop)
+        return _textual_plan_editor(steps)
     except ImportError:
-        pass  # curses not available (Windows)
+        _log_warning("Textual not installed — falling back to ANSI editor. "
+                     "Install with: pip install textual")
     except Exception as e:
-        _log_warning(f"Curses TUI failed: {e}")
+        _log_warning(f"Textual TUI failed: {e}")
 
-    # Fallback: ANSI-based editor (works everywhere)
+    # Fallback: ANSI-based editor (works everywhere, no deps)
     try:
         return _ansi_plan_editor(steps)
     except Exception as e:
@@ -46,7 +44,310 @@ def _log_warning(msg: str):
 
 
 # ══════════════════════════════════════════════════════════════════
-#  ANSI Plan Editor — no curses required, works on Windows + WSL
+#  Textual Plan Editor — modern GUI-like TUI
+# ══════════════════════════════════════════════════════════════════
+
+def _textual_plan_editor(steps: list[str]) -> list[str] | None:
+    """Launch the Textual-based plan editor."""
+    from textual.app import App, ComposeResult
+    from textual.containers import Horizontal, Vertical, VerticalScroll
+    from textual.widgets import (
+        Button, Footer, Header, Input, Label, ListItem, ListView, Static,
+    )
+    from textual.binding import Binding
+    from textual import on
+
+    class StepItem(ListItem):
+        """A single step in the plan list."""
+
+        def __init__(self, step_text: str, step_num: int) -> None:
+            super().__init__()
+            self.step_text = step_text
+            self.step_num = step_num
+
+        def compose(self) -> ComposeResult:
+            with Horizontal(classes="step-row"):
+                yield Label(f" {self.step_num:2d}. ", classes="step-num")
+                yield Label(self.step_text, classes="step-text")
+                yield Button("✎", id="edit", variant="default", classes="step-btn")
+                yield Button("▲", id="up", variant="default", classes="step-btn")
+                yield Button("▼", id="down", variant="default", classes="step-btn")
+                yield Button("✕", id="delete", variant="error", classes="step-btn")
+
+    class PlanEditorApp(App):
+        """Textual app for editing the execution plan."""
+
+        CSS = """
+        Screen {
+            background: $surface;
+        }
+        #title-bar {
+            dock: top;
+            height: 3;
+            background: #1a1a2e;
+            color: #e94560;
+            text-align: center;
+            padding: 1;
+            text-style: bold;
+        }
+        #step-list {
+            height: 1fr;
+            margin: 1 2;
+            border: round #444;
+            padding: 1;
+        }
+        .step-row {
+            height: 3;
+            align: left middle;
+            padding: 0 1;
+        }
+        .step-num {
+            width: 6;
+            color: #e9c46a;
+            text-style: bold;
+        }
+        .step-text {
+            width: 1fr;
+            color: #f8f8f2;
+        }
+        .step-btn {
+            min-width: 4;
+            width: 4;
+            height: 3;
+            margin: 0 0 0 1;
+        }
+        ListItem {
+            background: #16213e;
+            margin: 0 0 1 0;
+        }
+        ListItem:hover {
+            background: #0f3460;
+        }
+        ListView > ListItem.--highlight {
+            background: #0f3460;
+        }
+        #bottom-bar {
+            dock: bottom;
+            height: auto;
+            padding: 1 2;
+        }
+        #action-buttons {
+            height: 3;
+            align: center middle;
+        }
+        #action-buttons Button {
+            margin: 0 2;
+            min-width: 16;
+        }
+        #add-bar {
+            height: 3;
+            margin: 0 2 1 2;
+            align: left middle;
+        }
+        #add-input {
+            width: 1fr;
+        }
+        #add-btn {
+            width: 12;
+            margin: 0 0 0 1;
+        }
+        #edit-bar {
+            height: 3;
+            margin: 0 2 1 2;
+            align: left middle;
+            display: none;
+        }
+        #edit-input {
+            width: 1fr;
+        }
+        #edit-save-btn {
+            width: 12;
+            margin: 0 0 0 1;
+        }
+        #edit-cancel-btn {
+            width: 12;
+            margin: 0 0 0 1;
+        }
+        #step-count {
+            text-align: center;
+            color: #888;
+            margin: 0 0 1 0;
+        }
+        """
+
+        BINDINGS = [
+            Binding("escape", "cancel", "Cancel"),
+            Binding("ctrl+s", "approve", "Approve Plan"),
+        ]
+
+        def __init__(self, initial_steps: list[str]) -> None:
+            super().__init__()
+            self._steps = list(initial_steps)
+            self._result: list[str] | None = None
+            self._editing_index: int = -1
+
+        def compose(self) -> ComposeResult:
+            yield Static(
+                " ━━  AgentChanti — Plan Editor  ━━ ",
+                id="title-bar",
+            )
+            yield ListView(
+                *[StepItem(s, i + 1) for i, s in enumerate(self._steps)],
+                id="step-list",
+            )
+            yield Static("", id="step-count")
+            with Horizontal(id="edit-bar"):
+                yield Input(placeholder="Edit step text...", id="edit-input")
+                yield Button("Save", id="edit-save-btn", variant="success")
+                yield Button("Cancel", id="edit-cancel-btn", variant="default")
+            with Horizontal(id="add-bar"):
+                yield Input(
+                    placeholder="Type a new step and press Enter or click Add...",
+                    id="add-input",
+                )
+                yield Button("+ Add", id="add-btn", variant="success")
+            with Horizontal(id="action-buttons"):
+                yield Button(
+                    "✔ Approve Plan", id="approve-btn", variant="success"
+                )
+                yield Button(
+                    "✕ Cancel", id="cancel-btn", variant="error"
+                )
+            yield Footer()
+
+        def on_mount(self) -> None:
+            self._update_count()
+
+        def _rebuild_list(self) -> None:
+            """Rebuild the ListView from self._steps."""
+            lv = self.query_one("#step-list", ListView)
+            lv.clear()
+            for i, s in enumerate(self._steps):
+                lv.append(StepItem(s, i + 1))
+            self._update_count()
+
+        def _update_count(self) -> None:
+            self.query_one("#step-count", Static).update(
+                f"  {len(self._steps)} step(s)"
+            )
+
+        def _get_step_index(self, button: Button) -> int:
+            """Get the step index from a button inside a StepItem."""
+            item = button.ancestors_with_self
+            for ancestor in item:
+                if isinstance(ancestor, StepItem):
+                    lv = self.query_one("#step-list", ListView)
+                    children = list(lv.children)
+                    for idx, child in enumerate(children):
+                        if child is ancestor:
+                            return idx
+                    break
+            return -1
+
+        @on(Button.Pressed, "#edit")
+        def on_edit(self, event: Button.Pressed) -> None:
+            idx = self._get_step_index(event.button)
+            if 0 <= idx < len(self._steps):
+                self._editing_index = idx
+                edit_input = self.query_one("#edit-input", Input)
+                edit_input.value = self._steps[idx]
+                # Show edit bar, hide add bar
+                self.query_one("#edit-bar").styles.display = "block"
+                self.query_one("#add-bar").styles.display = "none"
+                edit_input.focus()
+
+        @on(Button.Pressed, "#edit-save-btn")
+        def on_edit_save(self, event: Button.Pressed) -> None:
+            text = self.query_one("#edit-input", Input).value.strip()
+            if text and 0 <= self._editing_index < len(self._steps):
+                self._steps[self._editing_index] = text
+                self._rebuild_list()
+            self._editing_index = -1
+            self.query_one("#edit-bar").styles.display = "none"
+            self.query_one("#add-bar").styles.display = "block"
+
+        @on(Button.Pressed, "#edit-cancel-btn")
+        def on_edit_cancel(self, event: Button.Pressed) -> None:
+            self._editing_index = -1
+            self.query_one("#edit-bar").styles.display = "none"
+            self.query_one("#add-bar").styles.display = "block"
+
+        @on(Button.Pressed, "#up")
+        def on_move_up(self, event: Button.Pressed) -> None:
+            idx = self._get_step_index(event.button)
+            if idx > 0:
+                self._steps[idx], self._steps[idx - 1] = (
+                    self._steps[idx - 1], self._steps[idx]
+                )
+                self._rebuild_list()
+
+        @on(Button.Pressed, "#down")
+        def on_move_down(self, event: Button.Pressed) -> None:
+            idx = self._get_step_index(event.button)
+            if 0 <= idx < len(self._steps) - 1:
+                self._steps[idx], self._steps[idx + 1] = (
+                    self._steps[idx + 1], self._steps[idx]
+                )
+                self._rebuild_list()
+
+        @on(Button.Pressed, "#delete")
+        def on_delete(self, event: Button.Pressed) -> None:
+            idx = self._get_step_index(event.button)
+            if 0 <= idx < len(self._steps):
+                self._steps.pop(idx)
+                self._rebuild_list()
+
+        @on(Button.Pressed, "#add-btn")
+        def on_add(self, event: Button.Pressed) -> None:
+            self._do_add()
+
+        @on(Input.Submitted, "#add-input")
+        def on_add_submit(self, event: Input.Submitted) -> None:
+            self._do_add()
+
+        def _do_add(self) -> None:
+            add_input = self.query_one("#add-input", Input)
+            text = add_input.value.strip()
+            if text:
+                self._steps.append(text)
+                add_input.value = ""
+                self._rebuild_list()
+
+        @on(Input.Submitted, "#edit-input")
+        def on_edit_submit(self, event: Input.Submitted) -> None:
+            text = event.value.strip()
+            if text and 0 <= self._editing_index < len(self._steps):
+                self._steps[self._editing_index] = text
+                self._rebuild_list()
+            self._editing_index = -1
+            self.query_one("#edit-bar").styles.display = "none"
+            self.query_one("#add-bar").styles.display = "block"
+
+        @on(Button.Pressed, "#approve-btn")
+        def on_approve(self, event: Button.Pressed) -> None:
+            self._result = list(self._steps) if self._steps else None
+            self.exit()
+
+        @on(Button.Pressed, "#cancel-btn")
+        def on_cancel_btn(self, event: Button.Pressed) -> None:
+            self._result = None
+            self.exit()
+
+        def action_cancel(self) -> None:
+            self._result = None
+            self.exit()
+
+        def action_approve(self) -> None:
+            self._result = list(self._steps) if self._steps else None
+            self.exit()
+
+    app = PlanEditorApp(steps)
+    app.run()
+    return app._result
+
+
+# ══════════════════════════════════════════════════════════════════
+#  ANSI Plan Editor — no dependencies, works everywhere (fallback)
 # ══════════════════════════════════════════════════════════════════
 
 def _clear_screen():
@@ -148,208 +449,3 @@ def _ansi_plan_editor(steps: list[str]) -> list[str] | None:
                     edited[idx], edited[idx+1] = edited[idx+1], edited[idx]
             except (ValueError, EOFError, KeyboardInterrupt):
                 pass
-
-
-# ══════════════════════════════════════════════════════════════════
-#  Curses Plan Editor — full TUI experience on Linux/macOS
-# ══════════════════════════════════════════════════════════════════
-
-class PlanEditorTUI:
-    """Curses-based interactive plan editor.
-
-    Key bindings:
-        ↑ / k      Move cursor up
-        ↓ / j      Move cursor down
-        e          Edit step text
-        d          Delete step
-        a          Add new step after cursor
-        K (shift)  Move step up
-        J (shift)  Move step down
-        Enter      Approve plan
-        q          Cancel (discard changes)
-    """
-
-    def __init__(self, steps: list[str]):
-        self.steps = list(steps)
-        self.cursor = 0
-        self.scroll_offset = 0
-
-    def _main_loop(self, stdscr) -> list[str] | None:
-        import curses
-        curses.curs_set(0)
-        curses.use_default_colors()
-
-        # Define colors if terminal supports it
-        if curses.has_colors():
-            curses.init_pair(1, curses.COLOR_CYAN, -1)     # header
-            curses.init_pair(2, curses.COLOR_GREEN, -1)     # selected
-            curses.init_pair(3, curses.COLOR_YELLOW, -1)    # step number
-            curses.init_pair(4, curses.COLOR_WHITE, -1)     # normal
-            curses.init_pair(5, curses.COLOR_BLACK, curses.COLOR_WHITE)  # help bar
-
-        while True:
-            self._draw(stdscr)
-            key = stdscr.getch()
-
-            if key in (ord('q'), 27):  # q or Escape
-                return None
-
-            elif key in (curses.KEY_ENTER, 10, 13):  # Enter
-                return self.steps if self.steps else None
-
-            elif key in (curses.KEY_UP, ord('k')):
-                self.cursor = max(0, self.cursor - 1)
-
-            elif key in (curses.KEY_DOWN, ord('j')):
-                self.cursor = min(len(self.steps) - 1, self.cursor + 1)
-
-            elif key == ord('K'):  # Move step up
-                if self.cursor > 0:
-                    self.steps[self.cursor], self.steps[self.cursor - 1] = \
-                        self.steps[self.cursor - 1], self.steps[self.cursor]
-                    self.cursor -= 1
-
-            elif key == ord('J'):  # Move step down
-                if self.cursor < len(self.steps) - 1:
-                    self.steps[self.cursor], self.steps[self.cursor + 1] = \
-                        self.steps[self.cursor + 1], self.steps[self.cursor]
-                    self.cursor += 1
-
-            elif key == ord('d'):  # Delete step
-                if self.steps:
-                    self.steps.pop(self.cursor)
-                    self.cursor = min(self.cursor, len(self.steps) - 1)
-
-            elif key == ord('a'):  # Add new step
-                new_text = self._edit_text(stdscr, "")
-                if new_text:
-                    self.steps.insert(self.cursor + 1, new_text)
-                    self.cursor += 1
-
-            elif key == ord('e'):  # Edit step
-                if self.steps:
-                    new_text = self._edit_text(stdscr, self.steps[self.cursor])
-                    if new_text is not None:
-                        self.steps[self.cursor] = new_text
-
-    def _draw(self, stdscr):
-        import curses
-        stdscr.clear()
-        height, width = stdscr.getmaxyx()
-
-        # Header
-        header = " AgentChanti — Plan Editor "
-        try:
-            stdscr.addstr(0, 0, header.center(width), curses.color_pair(1) | curses.A_BOLD)
-        except curses.error:
-            pass
-
-        # Calculate visible range
-        visible_lines = height - 5  # reserve for header + footer
-        if self.cursor < self.scroll_offset:
-            self.scroll_offset = self.cursor
-        elif self.cursor >= self.scroll_offset + visible_lines:
-            self.scroll_offset = self.cursor - visible_lines + 1
-
-        # Steps
-        for i, step in enumerate(self.steps):
-            if i < self.scroll_offset or i >= self.scroll_offset + visible_lines:
-                continue
-
-            row = 2 + (i - self.scroll_offset)
-            if row >= height - 2:
-                break
-
-            is_selected = (i == self.cursor)
-            num_str = f" {i + 1:2d}. "
-            step_str = step[:width - 8]  # truncate to fit
-
-            try:
-                if is_selected:
-                    stdscr.addstr(row, 0, "→", curses.color_pair(2) | curses.A_BOLD)
-                    stdscr.addstr(row, 1, num_str, curses.color_pair(3) | curses.A_BOLD)
-                    stdscr.addstr(row, len(num_str) + 1, step_str,
-                                 curses.color_pair(2) | curses.A_BOLD)
-                else:
-                    stdscr.addstr(row, 0, " ")
-                    stdscr.addstr(row, 1, num_str, curses.color_pair(3))
-                    stdscr.addstr(row, len(num_str) + 1, step_str, curses.color_pair(4))
-            except curses.error:
-                pass
-
-        # Help bar
-        help_text = " ↑↓:Nav  e:Edit  d:Del  a:Add  K/J:Reorder  Enter:Approve  q:Cancel "
-        try:
-            stdscr.addstr(height - 1, 0, help_text[:width].ljust(width),
-                         curses.color_pair(5))
-        except curses.error:
-            pass
-
-        # Step count
-        count_str = f" {len(self.steps)} steps "
-        try:
-            stdscr.addstr(height - 2, 0, count_str, curses.color_pair(1))
-        except curses.error:
-            pass
-
-        stdscr.refresh()
-
-    def _edit_text(self, stdscr, current_text: str) -> str | None:
-        """Simple inline text editor. Returns edited text or None if cancelled."""
-        import curses
-        curses.curs_set(1)
-        height, width = stdscr.getmaxyx()
-
-        # Show edit prompt at bottom
-        prompt = "Edit step (Enter=save, Esc=cancel): "
-        try:
-            stdscr.addstr(height - 3, 0, prompt, curses.color_pair(1))
-        except curses.error:
-            pass
-
-        # Create text buffer
-        text = list(current_text)
-        pos = len(text)
-        max_len = width - len(prompt) - 2
-
-        while True:
-            # Display current text
-            display_text = "".join(text)[:max_len]
-            try:
-                stdscr.addstr(height - 3, len(prompt), display_text.ljust(max_len))
-                stdscr.move(height - 3, len(prompt) + min(pos, max_len))
-            except curses.error:
-                pass
-            stdscr.refresh()
-
-            key = stdscr.getch()
-
-            if key == 27:  # Escape
-                curses.curs_set(0)
-                return None
-
-            elif key in (curses.KEY_ENTER, 10, 13):
-                curses.curs_set(0)
-                result = "".join(text).strip()
-                return result if result else None
-
-            elif key in (curses.KEY_BACKSPACE, 127, 8):
-                if pos > 0:
-                    text.pop(pos - 1)
-                    pos -= 1
-
-            elif key == curses.KEY_LEFT:
-                pos = max(0, pos - 1)
-
-            elif key == curses.KEY_RIGHT:
-                pos = min(len(text), pos + 1)
-
-            elif key == curses.KEY_HOME:
-                pos = 0
-
-            elif key == curses.KEY_END:
-                pos = len(text)
-
-            elif 32 <= key <= 126:  # printable ASCII
-                text.insert(pos, chr(key))
-                pos += 1

@@ -318,8 +318,8 @@ class CLIDisplay:
         Returns ``(action, removed_indices, edited_steps)`` where *action*
         is ``"approve"``, ``"replan"``, or ``"edit"``.
 
-        When *use_tui* is True and curses is available, the TUI plan editor
-        is used instead of the plain text editor.
+        The TUI editor (Textual-based) is always available via [E]dit.
+        A system text editor fallback is also available via [T]ext.
         """
         print("\n" + "=" * 60)
         print("  PROPOSED PLAN")
@@ -327,10 +327,7 @@ class CLIDisplay:
         for i, step in enumerate(steps, 1):
             print(f"  {i}. {step}")
         print("=" * 60)
-        if use_tui:
-            print("  [A]pprove  |  [R]eplan  |  [E]dit (TUI)  |  [T]ext editor")
-        else:
-            print("  [A]pprove  |  [R]eplan  |  [E]dit (open in editor)")
+        print("  [A]pprove  |  [R]eplan  |  [E]dit (TUI)  |  [T]ext editor")
         print()
 
         while True:
@@ -340,45 +337,30 @@ class CLIDisplay:
             elif choice in ("r", "replan"):
                 return "replan", [], None
             elif choice in ("e", "edit"):
-                if use_tui:
-                    # Try TUI editor first
-                    try:
-                        from ..tui_editor import launch_tui_editor
-                        edited = launch_tui_editor(steps)
-                        if edited:
-                            return "edit", [], edited
-                        # TUI unavailable or cancelled — fall through
-                        print("  TUI editor not available or cancelled. "
-                              "Falling back to text editor.")
-                    except Exception as e:
-                        print(f"  TUI editor failed ({e}). Using text editor.")
-                        log.warning(f"TUI editor exception: {e}")
-                # Fall back to text editor
+                # Launch the Textual TUI editor
+                try:
+                    from .tui_editor import launch_tui_editor
+                    edited = launch_tui_editor(steps)
+                    if edited:
+                        return "edit", [], edited
+                    # TUI cancelled — fall through
+                    print("  Edit cancelled or no changes.")
+                except Exception as e:
+                    print(f"  TUI editor failed ({e}). Try [T] for text editor.")
+                    log.warning(f"TUI editor exception: {e}")
+                # Re-show the menu
+                print()
+                print("  [A]pprove  |  [R]eplan  |  [E]dit (TUI)  |  [T]ext editor")
+                print()
+            elif choice in ("t", "text"):
+                # System text editor (vi/nano/notepad)
                 edited = CLIDisplay._edit_plan_in_editor(steps)
                 if edited:
                     return "edit", [], edited
                 else:
-                    print("  No changes detected or empty plan. Showing plan again.")
-                    print("\n" + "=" * 60)
-                    print("  PROPOSED PLAN")
-                    print("=" * 60)
-                    for i, step in enumerate(steps, 1):
-                        print(f"  {i}. {step}")
-                    print("=" * 60)
-                    if use_tui:
-                        print("  [A]pprove  |  [R]eplan  |  [E]dit (TUI)  |  [T]ext editor")
-                    else:
-                        print("  [A]pprove  |  [R]eplan  |  [E]dit (open in editor)")
-                    print()
-            elif choice in ("t", "text") and use_tui:
-                # Direct text editor access when TUI mode is on
-                edited = CLIDisplay._edit_plan_in_editor(steps)
-                if edited:
-                    return "edit", [], edited
-                else:
-                    print("  No changes detected.")
+                    print("  No changes detected or empty plan.")
             else:
-                print("  Invalid choice. Use A, R, or E.")
+                print("  Invalid choice. Use A, R, E, or T.")
 
     @staticmethod
     def _edit_plan_in_editor(steps: list[str]) -> list[str] | None:

@@ -235,3 +235,16 @@ class Config:
         path = _find_config_file(config_path)
         yaml_data = _load_yaml(path) if path else {}
         return cls(yaml_data)
+
+    # Safety: Critical files that require extra care when editing
+    CRITICAL_FILES = {
+        "package.json",
+        "pyproject.toml",
+        "go.mod",
+        "pom.xml",
+        "requirements.txt",
+        "Gemfile",
+        "composer.json",
+        "mix.exs",
+        "Cargo.toml",
+    }

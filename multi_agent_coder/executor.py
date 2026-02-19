@@ -185,6 +185,21 @@ class Executor:
 
         return files
 
+    # Dependency manifests and lock files that should NEVER be overwritten
+    # by LLM-generated content.  These files are managed by package managers
+    # and an LLM rewrite almost always drops dependencies, corrupting the
+    # project.  They can still be *created* if they don't exist yet.
+    _PROTECTED_FILENAMES: set[str] = {
+        'package.json', 'package-lock.json',
+        'yarn.lock', 'pnpm-lock.yaml',
+        'go.mod', 'go.sum',
+        'Cargo.toml', 'Cargo.lock',
+        'Gemfile', 'Gemfile.lock',
+        'composer.json', 'composer.lock',
+        'Pipfile', 'Pipfile.lock', 'poetry.lock',
+        'requirements.txt',
+    }
+
     @staticmethod
     def write_files(files: Dict[str, str], base_dir: str = ".") -> List[str]:
         """
@@ -193,6 +208,10 @@ class Executor:
         For Python files, automatically creates ``__init__.py`` in every
         parent directory so that imports like ``from src.module import X``
         work out of the box.
+
+        Protected manifest files (package.json, go.mod, etc.) are never
+        overwritten if they already exist — LLM-generated replacements
+        almost always drop dependencies and corrupt the project.
         """
         written = []
         init_dirs: set[str] = set()
@@ -200,6 +219,13 @@ class Executor:
         for filename, content in files.items():
             filepath = os.path.join(base_dir, filename)
             dirpath = os.path.dirname(filepath)
+
+            # Guard: never overwrite dependency manifests / lock files
+            basename = os.path.basename(filename)
+            if basename in Executor._PROTECTED_FILENAMES and os.path.isfile(filepath):
+                log.warning(f"[Executor] Skipping protected file: {filepath} "
+                            f"(already exists — overwriting could corrupt dependencies)")
+                continue
             if dirpath:
                 os.makedirs(dirpath, exist_ok=True)
             with open(filepath, "w", encoding="utf-8") as f:
@@ -423,9 +449,15 @@ class Executor:
         runner = test_command.split()[0]  # e.g. "pytest", "npx", "go"
         import shutil
         if not shutil.which(runner, path=env.get("PATH")):
-            msg = (f"Test runner `{runner}` is not installed or not on PATH.\n"
-                   f"Install it first (e.g. `pip install {runner}` or "
-                   f"`npm install --save-dev {runner}`).")
+            # Provide install hints appropriate to the tool
+            _system_tools = {"go", "cargo", "rustc", "javac", "java", "dotnet", "gcc", "g++"}
+            if runner in _system_tools:
+                hint = (f"`{runner}` must be installed manually from its "
+                        f"official website (not available via pip/npm).")
+            else:
+                hint = (f"Install it first (e.g. `pip install {runner}` or "
+                        f"`npm install --save-dev {runner}`).")
+            msg = f"Test runner `{runner}` is not installed or not on PATH.\n{hint}"
             log.warning(f"[Executor] {msg}")
             return False, msg
 

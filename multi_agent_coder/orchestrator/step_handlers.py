@@ -35,8 +35,12 @@ _RUNNER_INSTALL = {
 }
 
 
-def _get_runner_install_cmd(runner: str) -> str:
-    """Return the install command for a test runner binary."""
+def _get_runner_install_cmd(runner: str) -> str | None:
+    """Return the install command for a test runner binary.
+
+    Returns ``None`` for tools that must be installed manually (e.g. ``go``,
+    ``cargo``) — the caller must handle this gracefully.
+    """
     return _RUNNER_INSTALL.get(runner, f"pip install {runner}")
 
 
@@ -348,6 +352,13 @@ def _handle_test_step(step_text: str, tester: TesterAgent, coder: CoderAgent,
     if not shutil.which(runner):
         actual_tool = parts[1] if runner == "npx" and len(parts) > 1 else runner
         install_cmd = _get_runner_install_cmd(actual_tool)
+        if install_cmd is None:
+            # System-level tool (go, cargo, etc.) — can't auto-install
+            msg = (f"`{runner}` is not installed. It must be installed manually "
+                   f"(it cannot be installed via pip/npm).")
+            display.step_info(step_idx, msg)
+            log.error(f"Step {step_idx+1}: {msg}")
+            return False, msg
         display.step_info(step_idx, f"`{runner}` not found, installing...")
         log.info(f"Step {step_idx+1}: Auto-installing: {install_cmd}")
         ok, out = executor.run_command(install_cmd)
@@ -464,6 +475,13 @@ def _handle_test_step(step_text: str, tester: TesterAgent, coder: CoderAgent,
                 runner_parts = test_cmd.split()
                 actual_tool = runner_parts[1] if runner_parts[0] == "npx" and len(runner_parts) > 1 else runner_parts[0]
                 install_cmd = _get_runner_install_cmd(actual_tool)
+                if install_cmd is None:
+                    # System-level tool — can't auto-install, stop retrying
+                    display.step_info(step_idx,
+                                      f"`{actual_tool}` must be installed manually.")
+                    log.error(f"Step {step_idx+1}: `{actual_tool}` is not installed "
+                              f"and cannot be auto-installed.")
+                    break
                 display.step_info(step_idx, f"Installing `{actual_tool}`...")
                 log.info(f"Step {step_idx+1}: Installing test runner: {install_cmd}")
                 ok, out = executor.run_command(install_cmd)

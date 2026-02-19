@@ -8,7 +8,7 @@ from ..diff_display import show_diffs
 
 from .memory import FileMemory
 from .step_handlers import _shell_instructions
-from .classification import _extract_commands_from_text
+from .classification import _extract_commands_from_text, _looks_like_command
 
 
 def _diagnose_failure(step_text: str, step_type: str, error_info: str,
@@ -47,7 +47,13 @@ def _diagnose_failure(step_text: str, step_type: str, error_info: str,
             "Use the exact names, paths, and values from previous steps.\n"
             "Respond with:\n"
             "1. ROOT CAUSE: one-line explanation of what went wrong\n"
-            "2. FIX: provide the corrected shell command in backticks.\n"
+            "2. FIX: provide the corrected shell command inside a code block:\n"
+            "```bash\n"
+            "command here\n"
+            "```\n"
+            "3. SPECIAL CASE: If the command failed because the directory is not empty (e.g. create-react-app .), "
+            "the FIX is to create the app in a new subdirectory (e.g. `npx create-react-app my-app ...`) "
+            "instead of the current directory.\n"
             f"{_shell_instructions()}"
         )
     else:
@@ -120,6 +126,24 @@ def _apply_fix(diagnosis: str, executor: Executor, memory: FileMemory,
 
     # Extract and run fix commands (from triple-backtick blocks + inline backticks)
     fix_commands = _extract_commands_from_text(diagnosis)
+
+    # Fallback: if no commands found, look for raw lines that look like commands
+    # (e.g. "npx create-react-app ..." sitting on its own line)
+    if not fix_commands and step_type == "CMD":
+        for line in diagnosis.splitlines():
+            line = line.strip()
+            # Heuristic: line must start with a known command, contain spaces (args),
+            # and not be a numbered list item (e.g. "1. npx ...")
+            if not line or len(line.split()) < 2:
+                continue
+            # Remove leading bullets/numbers if present
+            clean_line = line.lstrip('1234567890.-* ').strip()
+            if _looks_like_command(clean_line) and clean_line not in fix_commands:
+                fix_commands.append(clean_line)
+        
+        if fix_commands:
+            log.info(f"Step {step_idx+1}: Fuzzy command parser found: {fix_commands}")
+
     for cmd in fix_commands:
         display.step_info(step_idx, f"Running fix: {cmd}")
         log.info(f"Step {step_idx+1}: Running fix command: {cmd}")

@@ -26,12 +26,11 @@ IMPORTANT RULES:
 - Each step should produce a concrete, verifiable result.
 - For steps that involve running shell commands (installing packages, running scripts, etc.), include the exact command in backticks.
 - All commands run non-interactively (no terminal input). Always include --yes, -y, or --defaults flags for tools that prompt for input (e.g. `npx create-next-app . --yes`, `npm init -y`).
+- Do NOT add test steps (writing tests or running tests) unless the user's task EXPLICITLY asks for tests. Never auto-generate test steps on your own.
 
 Example:
   1. Create a new utility function in `utils.py` for input validation
   2. Update the API endpoint in `app.py` to use the new validation (depends: 1)
-  3. Create unit tests for the validation logic in `tests/test_utils.py` (depends: 1)
-  4. Run tests with `pytest` (depends: 3)
 
 For each step, if it depends on a previous step being completed first, add (depends: N) or (depends: N, M) at the end of the step.
 Steps with no dependencies can run in parallel.

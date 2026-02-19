@@ -2,6 +2,8 @@
 Pipeline execution — wave-based parallel/sequential step execution.
 """
 
+import re
+
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from ..cli_display import CLIDisplay, log
@@ -16,6 +18,52 @@ from .diagnosis import _diagnose_failure, _apply_fix
 
 
 MAX_DIAGNOSIS_RETRIES = 2   # outer retries: diagnose failure → fix → re-run step
+
+# ── External service dependency detection ─────────────────────
+# Patterns that indicate the command failed because an external
+# service (database, cache, message broker, etc.) is unavailable.
+# These failures cannot be fixed by the agent — the user must
+# ensure the service is running.
+
+_EXTERNAL_SERVICE_PATTERNS: list[tuple[str, str]] = [
+    # MongoDB
+    (r'MongoServerSelectionError|MongoNetworkError|ECONNREFUSED.*27017',
+     'MongoDB (default port 27017)'),
+    # PostgreSQL
+    (r'ECONNREFUSED.*5432|could not connect to server.*5432|pg_hba\.conf|'
+     r'SequelizeConnectionRefusedError.*5432',
+     'PostgreSQL (default port 5432)'),
+    # MySQL / MariaDB
+    (r'ECONNREFUSED.*3306|ER_ACCESS_DENIED_ERROR|PROTOCOL_CONNECTION_LOST.*3306',
+     'MySQL/MariaDB (default port 3306)'),
+    # Redis
+    (r'ECONNREFUSED.*6379|Redis connection.*failed|NOAUTH',
+     'Redis (default port 6379)'),
+    # RabbitMQ
+    (r'ECONNREFUSED.*5672|amqp.*connection.*refused',
+     'RabbitMQ (default port 5672)'),
+    # Elasticsearch
+    (r'ECONNREFUSED.*9200|ConnectionError.*9200',
+     'Elasticsearch (default port 9200)'),
+    # Generic connection refused (with port)
+    (r'ECONNREFUSED\s+\d+\.\d+\.\d+\.\d+:\d+',
+     'an external service'),
+    # Generic connection timeout to localhost
+    (r'connect ETIMEDOUT\s+127\.0\.0\.1:\d+|'
+     r'connection timed out.*localhost',
+     'an external service on localhost'),
+]
+
+
+def _detect_external_service_failure(error_info: str) -> str | None:
+    """Check if an error is caused by an unavailable external service.
+
+    Returns a human-readable service name if detected, ``None`` otherwise.
+    """
+    for pattern, service_name in _EXTERNAL_SERVICE_PATTERNS:
+        if re.search(pattern, error_info, re.IGNORECASE):
+            return service_name
+    return None
 
 
 def build_step_waves(steps: list[str], dependencies: dict[int, set[int]]) -> list[list[int]]:
@@ -114,6 +162,21 @@ def _run_diagnosis_loop(step_idx: int, step_text: str, error_info: str, *,
     embedding error) never kills the whole pipeline — the step is simply
     marked as failed and the pipeline halts gracefully.
     """
+    # ── Early exit: external service dependency ──────────────────
+    # If the failure is due to an unavailable external service (DB,
+    # cache, etc.), diagnosis cannot help — inform the user instead.
+    service = _detect_external_service_failure(error_info)
+    if service:
+        msg = (f"Step requires {service} which is not reachable. "
+               f"Please ensure the service is running and accessible, "
+               f"then re-run the pipeline.")
+        display.step_info(step_idx, msg)
+        log.warning(f"Task {step_idx+1}: External service unavailable: {service}")
+        log.warning(f"Task {step_idx+1}: Skipping diagnosis — "
+                    f"this is not a code issue.")
+        display.complete_step(step_idx, "skipped")
+        return False
+
     for diag_attempt in range(1, MAX_DIAGNOSIS_RETRIES + 1):
         try:
             display.step_info(

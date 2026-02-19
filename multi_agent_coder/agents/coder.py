@@ -21,5 +21,8 @@ Rules:
 - The path after [FILE]: must be ONLY the file path, nothing else.
 - Use forward slashes in paths.
 - Do NOT add descriptions, comments, or parentheses after the file path.
+- CRITICAL: You are FORBIDDEN from editing `package.json`, `pyproject.toml`, or `go.mod` to add dependencies.
+  ALWAYS use shell commands (`npm install`, `pip install`, `go get`) for dependencies.
+  You may only edit these files to add/modify `scripts` or project metadata.
 """
         return self.llm_client.generate_response(prompt)

@@ -106,6 +106,11 @@ def show_diffs(files: dict[str, str], base_dir: str = ".",
 #  Interactive Diff Approval — Textual TUI
 # ══════════════════════════════════════════════════════════════════
 
+# Module-level flag: once the user picks "Approve & don't ask again",
+# all subsequent diffs are auto-approved for the rest of the session.
+_approve_all: bool = False
+
+
 def prompt_diff_approval(files: dict[str, str], base_dir: str = ".",
                          auto: bool = False) -> bool:
     """Show diffs in an interactive Textual viewer and wait for approval.
@@ -113,6 +118,7 @@ def prompt_diff_approval(files: dict[str, str], base_dir: str = ".",
     Returns ``True`` if the user approves (or if running in auto mode).
     Returns ``False`` if the user rejects.
     """
+    global _approve_all
     from .cli_display import log
 
     diffs = compute_diffs(files, base_dir)
@@ -122,8 +128,8 @@ def prompt_diff_approval(files: dict[str, str], base_dir: str = ".",
     if not diffs and not new_files:
         return True
 
-    # Auto mode — log diffs and approve
-    if auto:
+    # Auto mode or "approve all" — log diffs and approve
+    if auto or _approve_all:
         for filepath, diff_text in diffs:
             log.info(f"[auto] Diff for {filepath}:\n{diff_text}")
         if new_files:
@@ -229,6 +235,7 @@ def _textual_diff_approval(diffs: list[tuple[str, str]],
             Binding("ctrl+s", "approve", "Approve"),
             Binding("escape", "reject", "Reject"),
             Binding("r", "reject", "Reject"),
+            Binding("s", "approve_all", "Approve All"),
         ]
 
         def __init__(self, diffs: list[tuple[str, str]],
@@ -239,6 +246,7 @@ def _textual_diff_approval(diffs: list[tuple[str, str]],
             self._new_files = new_files
             self._files = files
             self._approved: bool = False
+            self._approve_all: bool = False
 
         def compose(self) -> ComposeResult:
             file_count = len(self._diffs) + len(self._new_files)
@@ -276,12 +284,16 @@ def _textual_diff_approval(diffs: list[tuple[str, str]],
                 summary_parts.append(f"{len(self._new_files)} new")
             yield Static(
                 f"  {' | '.join(summary_parts)}  —  "
-                f"Press [bold]A[/bold] to approve, [bold]R[/bold] or Esc to reject",
+                f"[bold]A[/bold] Approve  |  [bold]S[/bold] Approve All  |  "
+                f"[bold]R[/bold]/Esc Reject",
                 id="summary",
             )
             with Horizontal(id="action-buttons"):
                 yield Button(
                     "✔ Approve", id="approve-btn", variant="success",
+                )
+                yield Button(
+                    "✔ Approve All", id="approve-all-btn", variant="warning",
                 )
                 yield Button(
                     "✕ Reject", id="reject-btn", variant="error",
@@ -292,6 +304,10 @@ def _textual_diff_approval(diffs: list[tuple[str, str]],
             if event.button.id == "approve-btn":
                 self._approved = True
                 self.exit()
+            elif event.button.id == "approve-all-btn":
+                self._approved = True
+                self._approve_all = True
+                self.exit()
             elif event.button.id == "reject-btn":
                 self._approved = False
                 self.exit()
@@ -300,18 +316,28 @@ def _textual_diff_approval(diffs: list[tuple[str, str]],
             self._approved = True
             self.exit()
 
+        def action_approve_all(self) -> None:
+            self._approved = True
+            self._approve_all = True
+            self.exit()
+
         def action_reject(self) -> None:
             self._approved = False
             self.exit()
 
+    global _approve_all
     app = DiffApprovalApp(diffs, new_files, files)
     app.run()
+    if app._approve_all:
+        _approve_all = True
     return app._approved
 
 
 def _console_diff_approval(diffs: list[tuple[str, str]],
                            new_files: list[str]) -> bool:
     """Fallback console-based diff approval when Textual is unavailable."""
+    global _approve_all
+
     print("\n" + "=" * 60)
     print("  DIFF REVIEW")
     print("=" * 60)
@@ -324,7 +350,7 @@ def _console_diff_approval(diffs: list[tuple[str, str]],
         print(f"\n  New files: {', '.join(new_files)}")
 
     print("\n" + "=" * 60)
-    print("  [A]pprove  |  [R]eject")
+    print("  [A]pprove  |  [S]kip all (approve & don't ask again)  |  [R]eject")
     print()
 
     while True:
@@ -334,7 +360,10 @@ def _console_diff_approval(diffs: list[tuple[str, str]],
             return False
         if choice in ("a", "approve"):
             return True
+        elif choice in ("s", "skip"):
+            _approve_all = True
+            return True
         elif choice in ("r", "reject"):
             return False
         else:
-            print("  Invalid choice. Use A or R.")
+            print("  Invalid choice. Use A, S, or R.")

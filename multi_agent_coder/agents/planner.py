@@ -25,6 +25,7 @@ IMPORTANT RULES:
 - Combine "Identify" and "Fix" into a single actionable step (e.g., "Fix the logic in X" instead of "Identify bug in X" followed by "Fix bug in X").
 - Each step should produce a concrete, verifiable result.
 - For steps that involve running shell commands (installing packages, running scripts, etc.), include the exact command in backticks.
+- All commands run non-interactively (no terminal input). Always include --yes, -y, or --defaults flags for tools that prompt for input (e.g. `npx create-next-app . --yes`, `npm init -y`).
 
 Example:
   1. Create a new utility function in `utils.py` for input validation

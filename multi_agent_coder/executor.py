@@ -243,6 +243,43 @@ class Executor:
                 return True
         return False
 
+    # Known interactive commands and their non-interactive flags.
+    # Each entry: (regex_pattern, flags_that_mean_already_handled, flag_to_append)
+    _INTERACTIVE_REWRITES: list[tuple[str, tuple[str, ...], str]] = [
+        (r'\bnpx\s+create-next-app\b', ('--yes',), ' --yes'),
+        (r'\bnpm\s+init\b', ('--yes', '-y'), ' --yes'),
+        (r'\byarn\s+init\b', ('--yes', '-y'), ' --yes'),
+        (r'\bng\s+new\b', ('--defaults',), ' --defaults'),
+        (r'\bcomposer\s+create-project\b', ('--no-interaction',), ' --no-interaction'),
+    ]
+
+    @staticmethod
+    def _rewrite_interactive_cmd(cmd: str) -> str:
+        """Rewrite known interactive commands to add non-interactive flags.
+
+        Acts as a safety net so that even if the LLM forgets ``--yes``,
+        the command won't hang waiting for stdin.
+        """
+        for pattern, existing_flags, add_flag in Executor._INTERACTIVE_REWRITES:
+            if not re.search(pattern, cmd):
+                continue
+            if any(flag in cmd for flag in existing_flags):
+                break  # already has a non-interactive flag
+            cmd = cmd.rstrip() + add_flag
+            log.info(f"[Executor] Auto-added non-interactive flag: {add_flag.strip()}")
+            break
+        return cmd
+
+    @staticmethod
+    def _is_likely_interactive(cmd: str) -> bool:
+        """Return True if *cmd* matches patterns of commonly interactive CLI tools."""
+        patterns = (
+            r'\bcreate-next-app\b', r'\bcreate-react-app\b', r'\bcreate-vue\b',
+            r'\bcreate-vite\b', r'\bnpm\s+init\b', r'\byarn\s+init\b',
+            r'\bng\s+new\b', r'\bexpo\s+init\b', r'\bcomposer\s+create-project\b',
+        )
+        return any(re.search(p, cmd) for p in patterns)
+
     def run_command(self, cmd: str, env: dict | None = None,
                     timeout: int = 120, background: bool = False) -> Tuple[bool, str]:
         """
@@ -260,10 +297,18 @@ class Executor:
                 escaped = cmd.replace('"', '\\"')
                 cmd = f'powershell -NoProfile -Command "{escaped}"'
 
-            # Build environment — disable color codes for clean capture
+            # Safety net: add non-interactive flags to known interactive commands
+            cmd = Executor._rewrite_interactive_cmd(cmd)
+
+            # Build environment — disable color codes and interactive prompts
             run_env = env if env else os.environ.copy()
-            run_env["NO_COLOR"] = "1"
-            run_env["FORCE_COLOR"] = "0"
+            run_env.setdefault("NO_COLOR", "1")
+            run_env.setdefault("FORCE_COLOR", "0")
+            # Non-interactive: prevent CLI tools from prompting for input
+            run_env.setdefault("CI", "true")
+            run_env.setdefault("DEBIAN_FRONTEND", "noninteractive")
+            run_env.setdefault("PIP_NO_INPUT", "1")
+            run_env.setdefault("NPM_CONFIG_YES", "true")
 
             # Read as raw bytes and decode manually. On Windows, text=True
             # uses cp1252 by default, but most tools (Node.js, Jest, Go)
@@ -294,10 +339,18 @@ class Executor:
 
             if not output.strip() and proc.returncode != 0:
                 # Command failed silently — provide useful context
+                interactive_hint = ""
+                if Executor._is_likely_interactive(cmd):
+                    interactive_hint = (
+                        "- The command may require interactive input (prompts) "
+                        "which is not available. Try adding --yes, -y, or "
+                        "--defaults flag.\n"
+                    )
                 output = (
                     f"Command `{cmd}` exited with code {proc.returncode} "
                     f"but produced no output.\n"
                     f"Possible causes:\n"
+                    f"{interactive_hint}"
                     f"- The tool/binary is not installed or not on PATH\n"
                     f"- A required config file is missing\n"
                     f"- The command crashed before it could produce output"

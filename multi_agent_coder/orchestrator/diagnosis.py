@@ -87,8 +87,16 @@ def _diagnose_failure(step_text: str, step_type: str, error_info: str,
 
 def _apply_fix(diagnosis: str, executor: Executor, memory: FileMemory,
                display: CLIDisplay, step_idx: int,
-               step_type: str = "CODE") -> bool:
+               step_type: str = "CODE") -> tuple[bool, bool]:
+    """Apply fixes from a diagnosis response.
+
+    Returns ``(applied, cmds_succeeded)`` where *applied* is True if any
+    fix action was taken and *cmds_succeeded* is True if all fix commands
+    ran successfully (relevant for CMD steps where the fix command itself
+    is the corrected step).
+    """
     applied = False
+    cmds_succeeded = True
 
     # Only write code files for CODE / TEST steps, never for CMD
     if step_type != "CMD":
@@ -121,6 +129,8 @@ def _apply_fix(diagnosis: str, executor: Executor, memory: FileMemory,
             memory.update({
                 f"_fix_output/step_{step_idx+1}.txt": f"$ {cmd}\n\n{truncated}"
             })
+        if not success:
+            cmds_succeeded = False
         applied = True
 
-    return applied
+    return applied, cmds_succeeded

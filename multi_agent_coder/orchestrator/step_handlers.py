@@ -46,7 +46,7 @@ import platform
 def _shell_instructions() -> str:
     """Return OS-aware shell command guidance for LLM prompts."""
     if os.name == 'nt':
-        return (
+        base = (
             "Use plain CMD commands that work in Windows cmd.exe.\n"
             "For listing files use: dir /s /b\n"
             "For reading a file use: type <path>\n"
@@ -55,13 +55,23 @@ def _shell_instructions() -> str:
             "Do NOT use PowerShell cmdlets like Get-ChildItem, Select-Object, etc.\n"
         )
     else:
-        return (
+        base = (
             f"Use standard shell commands for {platform.system()}.\n"
             "For listing files use: find . -type f\n"
             "For reading a file use: cat <path>\n"
             "For creating a directory use: mkdir -p <path>\n"
             "For installing Python packages use: pip install <package>\n"
         )
+    base += (
+        "\nCRITICAL: Commands run non-interactively (no terminal input available).\n"
+        "NEVER use commands that prompt for user input. Always add non-interactive flags:\n"
+        "  - npx create-next-app: add --yes\n"
+        "  - npm init / yarn init: add --yes or -y\n"
+        "  - Angular CLI (ng new): add --defaults\n"
+        "  - Composer: add --no-interaction\n"
+        "  - Any tool with prompts: use --yes, --default, -y, or equivalent flag.\n"
+    )
+    return base
 
 
 def _shell_examples() -> str:

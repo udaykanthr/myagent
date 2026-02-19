@@ -126,15 +126,26 @@ def _run_diagnosis_loop(step_idx: int, step_text: str, error_info: str, *,
                 step_text, step_type, error_info,
                 memory, llm_client, display, step_idx)
 
-            fix_applied = _apply_fix(diagnosis, executor, memory, display, step_idx,
-                                     step_type=step_type)
+            fix_applied, cmds_succeeded = _apply_fix(
+                diagnosis, executor, memory, display, step_idx,
+                step_type=step_type)
 
             if not fix_applied:
                 display.step_info(step_idx, "No actionable fix found in diagnosis.")
                 log.warning(f"Task {step_idx+1}: Diagnosis produced no actionable fix.")
                 continue
 
-            # Re-run the step
+            # For CMD steps, the fix commands ARE the corrected step.
+            # If they all succeeded, the step is done — no need to re-run
+            # the original (which would likely fail again).
+            if step_type == "CMD" and cmds_succeeded:
+                display.step_info(step_idx, "Fix commands succeeded — step resolved.")
+                log.info(f"Task {step_idx+1}: CMD fix commands succeeded, "
+                         f"treating step as resolved.")
+                display.complete_step(step_idx, "done")
+                return True
+
+            # Re-run the step (for CODE/TEST: re-run with fixed files)
             display.step_info(step_idx, "Fix applied — retrying step...")
             _, success, error_info = _execute_step(
                 step_idx, step_text,

@@ -16,7 +16,7 @@ from ..language import get_code_block_lang, get_test_framework
 from .memory import FileMemory
 from .classification import _extract_command_from_step
 
-from ..diff_display import show_diffs, prompt_diff_approval
+from ..diff_display import show_diffs, prompt_diff_approval, _detect_hazards
 
 
 MAX_STEP_RETRIES = 3
@@ -224,6 +224,90 @@ def _handle_cmd_step(step_text: str, executor: Executor,
         return False, f"Command `{cmd}` failed.\nOutput:\n{output}"
 
 
+def _auto_fix_hazards(files: dict[str, str], coder: CoderAgent,
+                      executor: Executor, display: CLIDisplay,
+                      step_idx: int, step_text: str,
+                      language: str | None = None,
+                      base_dir: str = ".") -> dict[str, str]:
+    """Scan generated files for hazardous diffs and auto-fix them.
+
+    For each file where ``_detect_hazards`` flags problems (e.g. significant
+    size reduction, dependency removal), the coder LLM is asked to produce
+    a corrected version that preserves the existing content while applying
+    only the intended changes.
+
+    Returns the (potentially corrected) file dict.
+    """
+    fixed_files = dict(files)
+
+    for filepath, new_content in list(files.items()):
+        full_path = os.path.join(base_dir, filepath)
+        if not os.path.isfile(full_path):
+            continue  # new file, nothing to compare
+
+        try:
+            with open(full_path, "r", encoding="utf-8", errors="replace") as f:
+                old_content = f.read()
+        except OSError:
+            continue
+
+        hazards = _detect_hazards(filepath, old_content, new_content)
+        if not hazards:
+            continue
+
+        hazard_descriptions = "\n".join(f"- {msg}" for _, msg in hazards)
+        log.warning(f"Step {step_idx+1}: Hazards detected in {filepath}:\n"
+                    f"{hazard_descriptions}")
+        display.step_info(step_idx, f"Hazard in {filepath}, auto-fixing...")
+
+        fix_prompt = (
+            f"You generated a new version of `{filepath}` but it has safety issues:\n"
+            f"{hazard_descriptions}\n\n"
+            f"EXISTING file content (DO NOT lose any of this):\n"
+            f"```\n{old_content}\n```\n\n"
+            f"YOUR generated version (has problems):\n"
+            f"```\n{new_content}\n```\n\n"
+            f"The step was: {step_text}\n\n"
+            f"Produce a CORRECTED version of `{filepath}` that:\n"
+            f"1. Keeps ALL existing content (dependencies, imports, configs, etc.)\n"
+            f"2. Only adds/changes what the step requires\n"
+            f"3. Does NOT remove anything that was in the original file\n\n"
+            f"#### [FILE]: {filepath}\n"
+            f"```\n"
+            f"(write the complete corrected file here)\n"
+            f"```"
+        )
+
+        sent_before = token_tracker.total_prompt_tokens
+        recv_before = token_tracker.total_completion_tokens
+
+        fix_response = coder.process(fix_prompt, context="", language=language)
+
+        sent_delta = token_tracker.total_prompt_tokens - sent_before
+        recv_delta = token_tracker.total_completion_tokens - recv_before
+        display.step_tokens(step_idx, sent_delta, recv_delta)
+
+        fix_files = executor.parse_code_blocks(fix_response)
+        if not fix_files:
+            fix_files = executor.parse_code_blocks_fuzzy(fix_response)
+
+        if filepath in fix_files:
+            # Verify the fix resolved the hazard
+            new_hazards = _detect_hazards(filepath, old_content, fix_files[filepath])
+            if len(new_hazards) < len(hazards):
+                fixed_files[filepath] = fix_files[filepath]
+                log.info(f"Step {step_idx+1}: Auto-fixed hazard in {filepath} "
+                         f"({len(hazards)} -> {len(new_hazards)} hazards)")
+                display.step_info(step_idx, f"Fixed hazard in {filepath}")
+            else:
+                log.warning(f"Step {step_idx+1}: Auto-fix did not resolve hazard in "
+                            f"{filepath}, keeping original generated version for user review")
+        else:
+            log.warning(f"Step {step_idx+1}: Auto-fix did not return {filepath}")
+
+    return fixed_files
+
+
 def _handle_code_step(step_text: str, coder: CoderAgent, reviewer: ReviewerAgent,
                       executor: Executor, task: str, memory: FileMemory,
                       display: CLIDisplay, step_idx: int,
@@ -260,6 +344,10 @@ def _handle_code_step(step_text: str, coder: CoderAgent, reviewer: ReviewerAgent
             display.step_info(step_idx, "No files parsed, retrying...")
             log.warning(f"Step {step_idx+1}: No files parsed from coder response.")
             continue
+
+        # Auto-fix hazardous diffs before showing to user
+        files = _auto_fix_hazards(files, coder, executor, display, step_idx,
+                                  step_text, language=language)
 
         # Show diffs and wait for approval before writing
         approved = prompt_diff_approval(files, auto=auto)

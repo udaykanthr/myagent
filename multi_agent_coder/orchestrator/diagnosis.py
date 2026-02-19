@@ -2,9 +2,11 @@
 Diagnosis and fix helpers — analyze step failures and apply fixes.
 """
 
+import os
+
 from ..executor import Executor
 from ..cli_display import CLIDisplay, token_tracker, log
-from ..diff_display import show_diffs
+from ..diff_display import show_diffs, _detect_hazards
 
 from .memory import FileMemory
 from .step_handlers import _shell_instructions
@@ -117,12 +119,36 @@ def _apply_fix(diagnosis: str, executor: Executor, memory: FileMemory,
                          f"fuzzy parser extracted: {list(files.keys())}")
 
         if files:
-            show_diffs(files, log_only=True)
-            written = executor.write_files(files)
-            memory.update(files)
-            display.step_info(step_idx, f"Fixed files: {', '.join(written)}")
-            log.info(f"Step {step_idx+1}: Applied code fixes to: {', '.join(written)}")
-            applied = True
+            # Filter out files with hazardous diffs (e.g. truncation,
+            # dependency removal) — these would corrupt the project.
+            safe_files: dict[str, str] = {}
+            for filepath, content in files.items():
+                full_path = os.path.join(".", filepath)
+                if os.path.isfile(full_path):
+                    try:
+                        with open(full_path, "r", encoding="utf-8",
+                                  errors="replace") as f:
+                            old_content = f.read()
+                        hazards = _detect_hazards(filepath, old_content, content)
+                        if hazards:
+                            msgs = "; ".join(m for _, m in hazards)
+                            log.warning(f"Step {step_idx+1}: Skipping hazardous "
+                                        f"fix for {filepath}: {msgs}")
+                            display.step_info(step_idx,
+                                              f"Skipped unsafe fix for {filepath}")
+                            continue
+                    except OSError:
+                        pass
+                safe_files[filepath] = content
+
+            if safe_files:
+                show_diffs(safe_files, log_only=True)
+                written = executor.write_files(safe_files)
+                memory.update(safe_files)
+                display.step_info(step_idx, f"Fixed files: {', '.join(written)}")
+                log.info(f"Step {step_idx+1}: Applied code fixes to: "
+                         f"{', '.join(written)}")
+                applied = True
 
     # Extract and run fix commands (from triple-backtick blocks + inline backticks)
     fix_commands = _extract_commands_from_text(diagnosis)

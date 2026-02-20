@@ -25,6 +25,10 @@ _DEFAULTS = {
     "lm_studio_base_url": "http://localhost:1234/v1",
     "openai_api_key": "",
     "openai_base_url": "https://api.openai.com/v1",
+    "gemini_api_key": "",
+    "gemini_base_url": "https://generativelanguage.googleapis.com/v1beta",
+    "anthropic_api_key": "",
+    "anthropic_base_url": "https://api.anthropic.com/v1",
     "models": {},
     "embedding_cache_dir": ".agentchanti",
     "report_dir": ".agentchanti/reports",
@@ -42,6 +46,11 @@ _DEFAULTS = {
         "claude-3-opus": {"input": 15.00, "output": 75.00},
         "claude-3-haiku": {"input": 0.25, "output": 1.25},
         "deepseek-coder": {"input": 0.14, "output": 0.28},
+        "gemini-2.0-flash": {"input": 0.10, "output": 0.40},
+        "gemini-2.5-pro": {"input": 1.25, "output": 10.00},
+        "gemini-2.5-flash": {"input": 0.15, "output": 0.60},
+        "claude-sonnet-4": {"input": 3.00, "output": 15.00},
+        "claude-haiku-4": {"input": 0.80, "output": 4.00},
     }
 }
 
@@ -141,6 +150,20 @@ class Config:
         self.OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL") or openai_section.get(
             "base_url", _DEFAULTS["openai_base_url"])
 
+        # Gemini
+        gemini_section = yd.get("gemini", {}) if isinstance(yd.get("gemini"), dict) else {}
+        self.GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or gemini_section.get(
+            "api_key", _DEFAULTS["gemini_api_key"])
+        self.GEMINI_BASE_URL = os.getenv("GEMINI_BASE_URL") or gemini_section.get(
+            "base_url", _DEFAULTS["gemini_base_url"])
+
+        # Anthropic
+        anthropic_section = yd.get("anthropic", {}) if isinstance(yd.get("anthropic"), dict) else {}
+        self.ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY") or anthropic_section.get(
+            "api_key", _DEFAULTS["anthropic_api_key"])
+        self.ANTHROPIC_BASE_URL = os.getenv("ANTHROPIC_BASE_URL") or anthropic_section.get(
+            "base_url", _DEFAULTS["anthropic_base_url"])
+
         # Per-agent model overrides
         self._agent_models: dict[str, str] = {}
         models_section = yd.get("models", {})
@@ -206,6 +229,14 @@ class Config:
             "openai": {
                 "api_key": self.OPENAI_API_KEY,
                 "base_url": self.OPENAI_BASE_URL,
+            },
+            "gemini": {
+                "api_key": self.GEMINI_API_KEY,
+                "base_url": self.GEMINI_BASE_URL,
+            },
+            "anthropic": {
+                "api_key": self.ANTHROPIC_API_KEY,
+                "base_url": self.ANTHROPIC_BASE_URL,
             },
             "models": self._agent_models,
             "prompts": self.PROMPT_SUFFIXES,

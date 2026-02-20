@@ -36,7 +36,8 @@ from .pipeline import build_step_waves, _execute_step, _run_diagnosis_loop
 def main():
     parser = argparse.ArgumentParser(description="AgentChanti — Multi-Agent Local Coder")
     parser.add_argument("task", nargs="?", help="The coding task to perform")
-    parser.add_argument("--provider", choices=["ollama", "lm_studio", "openai"],
+    parser.add_argument("--prompt-from-file", help="Read prompt from a text file")
+    parser.add_argument("--provider", choices=["ollama", "lm_studio", "openai", "gemini", "anthropic"],
                         default="lm_studio", help="The LLM provider to use")
     parser.add_argument("--model", default=None,
                         help="The model name to use (default: from config)")
@@ -104,6 +105,15 @@ def main():
         print("\n  ✨ Generated .agentchanti.yaml with current settings.\n")
         return
 
+    # Handle prompt-from-file
+    if args.prompt_from_file:
+        try:
+            with open(args.prompt_from_file, "r", encoding="utf-8") as f:
+                args.task = f.read().strip()
+        except Exception as e:
+            print(f"\n  [ERROR] Could not read prompt file: {e}\n")
+            return
+
     if not args.task:
         parser.print_help()
         return
@@ -136,6 +146,26 @@ def main():
             return
         llm_client = OpenAIClient(
             base_url=cfg.OPENAI_BASE_URL, model=model,
+            api_key=api_key, **llm_kwargs)
+    elif provider == "gemini":
+        from ..llm.gemini_client import GeminiClient
+        api_key = cfg.GEMINI_API_KEY
+        if not api_key:
+            print("\n  [ERROR] Gemini provider requires an API key.\n"
+                  "  Set GEMINI_API_KEY env var or add it to .agentchanti.yaml.\n")
+            return
+        llm_client = GeminiClient(
+            base_url=cfg.GEMINI_BASE_URL, model=model,
+            api_key=api_key, **llm_kwargs)
+    elif provider == "anthropic":
+        from ..llm.anthropic_client import AnthropicClient
+        api_key = cfg.ANTHROPIC_API_KEY
+        if not api_key:
+            print("\n  [ERROR] Anthropic provider requires an API key.\n"
+                  "  Set ANTHROPIC_API_KEY env var or add it to .agentchanti.yaml.\n")
+            return
+        llm_client = AnthropicClient(
+            base_url=cfg.ANTHROPIC_BASE_URL, model=model,
             api_key=api_key, **llm_kwargs)
     else:
         llm_client = LMStudioClient(
@@ -205,6 +235,16 @@ def main():
             return OpenAIClient(
                 base_url=cfg.OPENAI_BASE_URL, model=agent_model,
                 api_key=cfg.OPENAI_API_KEY, **llm_kwargs)
+        elif provider == "gemini":
+            from ..llm.gemini_client import GeminiClient
+            return GeminiClient(
+                base_url=cfg.GEMINI_BASE_URL, model=agent_model,
+                api_key=cfg.GEMINI_API_KEY, **llm_kwargs)
+        elif provider == "anthropic":
+            from ..llm.anthropic_client import AnthropicClient
+            return AnthropicClient(
+                base_url=cfg.ANTHROPIC_BASE_URL, model=agent_model,
+                api_key=cfg.ANTHROPIC_API_KEY, **llm_kwargs)
         else:
             return LMStudioClient(
                 base_url=cfg.LM_STUDIO_BASE_URL, model=agent_model, **llm_kwargs)

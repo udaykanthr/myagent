@@ -19,7 +19,7 @@
   <img src="https://img.shields.io/badge/python-3.10%2B-blue" alt="Python 3.10+">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License">
   <img src="https://img.shields.io/badge/LLM-Local%20%2B%20Cloud-orange" alt="Local + Cloud">
-  <img src="https://img.shields.io/badge/providers-Ollama%20%7C%20LM%20Studio%20%7C%20OpenAI-blueviolet" alt="Multiple Providers">
+  <img src="https://img.shields.io/badge/providers-Ollama%20%7C%20LM%20Studio%20%7C%20OpenAI%20%7C%20Gemini%20%7C%20Claude-blueviolet" alt="Multiple Providers">
 </p>
 
 
@@ -42,7 +42,7 @@ The agents collaborate in a pipeline with built-in retry loops, automatic failur
 ## Features
 
 ### Core
-- **Local + Cloud LLMs** — Works with [Ollama](https://ollama.com), [LM Studio](https://lmstudio.ai), and any **OpenAI-compatible API** (OpenAI, Groq, Together.ai, etc.)
+- **Local + Cloud LLMs** — Works with [Ollama](https://ollama.com), [LM Studio](https://lmstudio.ai), any **OpenAI-compatible API** (OpenAI, Groq, Together.ai, etc.), **Google Gemini**, and **Anthropic Claude**
 - **Multi-Language Support** — Auto-detects your project's language (Python, JavaScript, TypeScript, Go, Rust, Java, Ruby, C++, and more) and adapts prompts, code style, and test frameworks accordingly.
 - **Existing Project Awareness** — Scans your current directory before planning so the agents understand your codebase, dependencies, and structure.
 - **Parallel Execution** — Independent steps run in parallel when the planner marks them as having no dependencies.
@@ -54,7 +54,7 @@ The agents collaborate in a pipeline with built-in retry loops, automatic failur
 - **Step-Level Caching** — Hashes step inputs and caches LLM responses. Re-running the same task skips completed steps instantly. Configurable TTL (default: 24h).
 - **Custom Agent Prompts** — Override or extend agent behavior via `.agentchanti.yaml` config (coding conventions, review criteria, etc.)
 - **Plugin System** — Extend with custom step types (DEPLOY, LINT, DOCS, etc.) via Python classes.
-- **Cloud LLM (OpenAI-compatible)** — High-performance coding with **GPT-4o**, **Claude 3.5**, or **DeepSeek**.
+- **Cloud LLMs** — High-performance coding with **GPT-4o**, **Gemini 2.5**, **Claude Sonnet 4**, or **DeepSeek** via native APIs.
 - **TUI Plan Editor** — Interactively edit, add, or reorder steps before execution starts.
 - **Cost Tracking & Budgets** — Monitor cloud API spending and set hard limits.
 
@@ -136,7 +136,7 @@ agentchanti --help
 
 ## LLM Server Setup
 
-AgentChanti supports three LLM providers. Choose **one** (or configure multiple):
+AgentChanti supports five LLM providers. Choose **one** (or configure multiple):
 
 ### Option A: Ollama (Recommended for beginners)
 
@@ -219,6 +219,56 @@ agentchanti "your task" --provider openai --model llama-3.1-70b-versatile
 
 ---
 
+### Option D: Google Gemini
+
+Use Google's Gemini models directly via the native Gemini REST API.
+
+**Via environment variable:**
+```bash
+export GEMINI_API_KEY="your-gemini-api-key"
+agentchanti "Create a REST API" --provider gemini --model gemini-2.5-flash
+```
+
+**Via config file (`.agentchanti.yaml`):**
+```yaml
+gemini:
+  api_key: "your-gemini-api-key"
+  base_url: "https://generativelanguage.googleapis.com/v1beta"  # default
+```
+
+```bash
+agentchanti "Create a REST API" --provider gemini --model gemini-2.5-pro
+```
+
+> **Note:** Gemini also supports embeddings via the `text-embedding-004` model.
+
+---
+
+### Option E: Anthropic Claude
+
+Use Anthropic's Claude models directly via the native Messages API.
+
+**Via environment variable:**
+```bash
+export ANTHROPIC_API_KEY="sk-ant-your-key-here"
+agentchanti "Create a REST API" --provider anthropic --model claude-sonnet-4
+```
+
+**Via config file (`.agentchanti.yaml`):**
+```yaml
+anthropic:
+  api_key: "sk-ant-your-key-here"
+  base_url: "https://api.anthropic.com/v1"  # default
+```
+
+```bash
+agentchanti "Create a REST API" --provider anthropic --model claude-sonnet-4
+```
+
+> **Note:** Anthropic does not provide an embedding API. If you need embeddings, configure a different provider (e.g. OpenAI or Gemini) for the `--embed-model`.
+
+---
+
 ### Optional: Embedding Model (for smarter context retrieval)
 
 Embeddings help AgentChanti find the most relevant files for each step. Enabled by default with persistent SQLite caching.
@@ -246,7 +296,7 @@ agentchanti "<task description>" [options]
 | Flag | Description | Default |
 |------|-------------|---------|
 | `"task"` | The coding task to perform (required) | — |
-| `--provider` | LLM provider: `ollama`, `lm_studio`, or `openai` | `lm_studio` |
+| `--provider` | LLM provider: `ollama`, `lm_studio`, `openai`, `gemini`, or `anthropic` | `lm_studio` |
 | `--model` | Model name to use | `deepseek-coder-v2-lite-instruct` |
 | `--embed-model` | Embedding model name | `nomic-embed-text` |
 | `--language` | Override auto-detected language (e.g. `python`, `javascript`) | auto-detect |
@@ -276,39 +326,49 @@ agentchanti "Create a Python script that reads a CSV and generates a bar chart u
 agentchanti "Build a Flask REST API with CRUD operations on a books database using SQLite"
 ```
 
-**3. Using a cloud provider**
+**3. Using OpenAI**
 ```bash
 OPENAI_API_KEY="sk-..." agentchanti "Build a CLI password generator" --provider openai --model gpt-4o-mini
 ```
 
-**4. Using Ollama with a specific model**
+**4. Using Google Gemini**
+```bash
+GEMINI_API_KEY="..." agentchanti "Build a CLI password generator" --provider gemini --model gemini-2.5-flash
+```
+
+**5. Using Anthropic Claude**
+```bash
+ANTHROPIC_API_KEY="sk-ant-..." agentchanti "Build a CLI password generator" --provider anthropic --model claude-sonnet-4
+```
+
+**6. Using Ollama with a specific model**
 ```bash
 agentchanti "Create a CLI password generator" --provider ollama --model codellama:13b
 ```
 
-**5. JavaScript / Node.js project**
+**7. JavaScript / Node.js project**
 ```bash
 agentchanti "Create an Express.js REST API with JWT authentication" --language javascript
 ```
 
-**6. Working on an existing project**
+**8. Working on an existing project**
 ```bash
 cd my-existing-project/
 agentchanti "Add input validation to all API endpoints"
 # AgentChanti scans the directory first and understands your codebase
 ```
 
-**7. Non-interactive (CI/scripts)**
+**9. Non-interactive (CI/scripts)**
 ```bash
 agentchanti "Generate unit tests for all modules" --auto --no-git --no-report
 ```
 
-**8. Re-run with fresh cache**
+**10. Re-run with fresh cache**
 ```bash
 agentchanti "Refactor the database layer" --clear-cache
 ```
 
-**9. Generate a configuration file**
+**11. Generate a configuration file**
 ```bash
 agentchanti --generate-yaml
 # Creates .agentchanti.yaml with defaults
@@ -334,9 +394,19 @@ openai:
   api_key: "sk-..."
   base_url: "https://api.openai.com/v1"
 
+gemini:
+  api_key: "your-gemini-api-key"
+  base_url: "https://generativelanguage.googleapis.com/v1beta"
+
+anthropic:
+  api_key: "sk-ant-..."
+  base_url: "https://api.anthropic.com/v1"
+
 # Custom Pricing (per 1M tokens)
 pricing:
   gpt-4o: {input: 2.50, output: 10.00}
+  gemini-2.5-flash: {input: 0.15, output: 0.60}
+  claude-sonnet-4: {input: 3.00, output: 15.00}
 ```
 ### Config File (`.agentchanti.yaml`)
 
@@ -358,6 +428,16 @@ lm_studio_base_url: "http://localhost:1234/v1"
 openai:
   api_key: "sk-your-key-here"
   base_url: "https://api.openai.com/v1"
+
+# Google Gemini
+gemini:
+  api_key: "your-gemini-api-key"
+  base_url: "https://generativelanguage.googleapis.com/v1beta"
+
+# Anthropic Claude
+anthropic:
+  api_key: "sk-ant-your-key-here"
+  base_url: "https://api.anthropic.com/v1"
 
 # Embeddings
 embedding_model: "nomic-embed-text"
@@ -406,7 +486,11 @@ All settings can also be set via environment variables:
 | `OLLAMA_BASE_URL` | `http://localhost:11434/api/generate` | Ollama API endpoint |
 | `LM_STUDIO_BASE_URL` | `http://localhost:1234/v1` | LM Studio API endpoint |
 | `OPENAI_API_KEY` | — | API key for OpenAI-compatible providers |
-| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Cloud LLM API base URL |
+| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | OpenAI API base URL |
+| `GEMINI_API_KEY` | — | API key for Google Gemini |
+| `GEMINI_BASE_URL` | `https://generativelanguage.googleapis.com/v1beta` | Gemini API base URL |
+| `ANTHROPIC_API_KEY` | — | API key for Anthropic Claude |
+| `ANTHROPIC_BASE_URL` | `https://api.anthropic.com/v1` | Anthropic API base URL |
 | `EMBEDDING_MODEL` | `nomic-embed-text` | Embedding model name |
 | `EMBEDDING_TOP_K` | `5` | Number of files to retrieve for context |
 | `EMBEDDING_CACHE_DIR` | `.agentchanti` | Directory for persistent embedding cache |
@@ -567,6 +651,8 @@ myagent/
       ollama.py                # Ollama HTTP client
       lm_studio.py             # LM Studio (OpenAI-compatible) client
       openai_client.py         # Cloud LLM client (any OpenAI-compatible API)
+      gemini_client.py         # Google Gemini native API client
+      anthropic_client.py      # Anthropic Claude native API client
     orchestrator/
       __init__.py              # Package init with backward-compatible exports
       cli.py                   # CLI entry point with argparse
@@ -639,6 +725,30 @@ Make sure your API key is set:
 export OPENAI_API_KEY="sk-your-key-here"
 # Or add it to .agentchanti.yaml under openai.api_key
 ```
+
+### Gemini provider: authentication errors
+
+Make sure your API key is set:
+```bash
+export GEMINI_API_KEY="your-gemini-api-key"
+# Or add it to .agentchanti.yaml under gemini.api_key
+```
+Get an API key from [Google AI Studio](https://aistudio.google.com/).
+
+### Anthropic provider: authentication errors
+
+Make sure your API key is set:
+```bash
+export ANTHROPIC_API_KEY="sk-ant-your-key-here"
+# Or add it to .agentchanti.yaml under anthropic.api_key
+```
+Get an API key from the [Anthropic Console](https://console.anthropic.com/).
+
+### Anthropic provider: no embeddings
+
+Anthropic does not offer an embedding API. If you need embeddings, either:
+- Use `--no-embeddings` to disable them
+- Configure a different provider's embedding model via `--embed-model`
 
 ### Plan has too many / wrong steps
 

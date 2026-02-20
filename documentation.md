@@ -11,7 +11,8 @@ Welcome to the AgentChanti documentation! This guide will help you set up and us
     - [Ollama](#ollama)
     - [LM Studio](#lm-studio)
     - [OpenAI & Cloud Providers](#openai--cloud-providers)
-    - [Google Gemini (OpenAI-compatible)](#google-gemini-openai-compatible)
+    - [Google Gemini](#google-gemini)
+    - [Anthropic Claude](#anthropic-claude)
 4. [Command Line Interface (CLI)](#command-line-interface-cli)
 5. [Key Features](#key-features)
     - [TUI Plan Editor](#tui-plan-editor)
@@ -66,10 +67,24 @@ openai:
   api_key: "sk-your-key-here"
   base_url: "https://api.openai.com/v1"
 
+# Google Gemini
+gemini:
+  api_key: "your-gemini-api-key"
+  base_url: "https://generativelanguage.googleapis.com/v1beta"
+
+# Anthropic Claude
+anthropic:
+  api_key: "sk-ant-your-key-here"
+  base_url: "https://api.anthropic.com/v1"
+
 # Custom Pricing (Optional, per 1M tokens)
 pricing:
   gpt-4o: {input: 2.50, output: 10.00}
   gpt-4o-mini: {input: 0.15, output: 0.60}
+  gemini-2.5-flash: {input: 0.15, output: 0.60}
+  gemini-2.5-pro: {input: 1.25, output: 10.00}
+  claude-sonnet-4: {input: 3.00, output: 15.00}
+  claude-haiku-4: {input: 0.80, output: 4.00}
 
 # Custom Agent Behavior
 prompts:
@@ -85,8 +100,12 @@ step_cache_ttl_hours: 24
 ### Environment Variables
 | Variable | Description |
 |----------|-------------|
-| `OPENAI_API_KEY` | API key for cloud providers |
-| `OPENAI_BASE_URL` | Base URL for the API (e.g., https://api.openai.com/v1) |
+| `OPENAI_API_KEY` | API key for OpenAI-compatible providers |
+| `OPENAI_BASE_URL` | Base URL for the OpenAI API (e.g., https://api.openai.com/v1) |
+| `GEMINI_API_KEY` | API key for Google Gemini |
+| `GEMINI_BASE_URL` | Base URL for the Gemini API (default: https://generativelanguage.googleapis.com/v1beta) |
+| `ANTHROPIC_API_KEY` | API key for Anthropic Claude |
+| `ANTHROPIC_BASE_URL` | Base URL for the Anthropic API (default: https://api.anthropic.com/v1) |
 | `DEFAULT_MODEL` | Default model name |
 | `CONTEXT_WINDOW` | Maximum context tokens (default: 8192) |
 
@@ -119,16 +138,45 @@ export OPENAI_API_KEY="your-key"
 agentchanti "task" --provider openai --model gpt-4o
 ```
 
-### Google Gemini (OpenAI-compatible)
-Google Gemini can be used via its OpenAI-compatible endpoint.
+### Google Gemini
+Google Gemini is supported as a first-class provider via its native REST API.
 1. Get an API key from [Google AI Studio](https://aistudio.google.com/).
 2. Configure in `.agentchanti.yaml`:
 ```yaml
-openai:
-  api_key: "YOUR_GEMINI_API_KEY"
-  base_url: "https://generativelanguage.googleapis.com/v1beta/openai/"
+gemini:
+  api_key: "your-gemini-api-key"
+  base_url: "https://generativelanguage.googleapis.com/v1beta"  # default
 ```
-3. Run: `agentchanti "task" --provider openai --model gemini-1.5-flash`
+Or set the environment variable: `export GEMINI_API_KEY="your-key"`
+
+3. Run:
+```bash
+agentchanti "task" --provider gemini --model gemini-2.5-flash
+```
+
+**Available models:** `gemini-2.0-flash`, `gemini-2.5-flash`, `gemini-2.5-pro`
+
+**Embeddings:** Gemini supports embeddings via the `text-embedding-004` model.
+
+### Anthropic Claude
+Anthropic Claude is supported as a first-class provider via the native Messages API.
+1. Get an API key from the [Anthropic Console](https://console.anthropic.com/).
+2. Configure in `.agentchanti.yaml`:
+```yaml
+anthropic:
+  api_key: "sk-ant-your-key-here"
+  base_url: "https://api.anthropic.com/v1"  # default
+```
+Or set the environment variable: `export ANTHROPIC_API_KEY="your-key"`
+
+3. Run:
+```bash
+agentchanti "task" --provider anthropic --model claude-sonnet-4
+```
+
+**Available models:** `claude-sonnet-4`, `claude-haiku-4`
+
+**Embeddings:** Anthropic does not provide an embedding API. Use `--no-embeddings` or configure a different provider for embeddings.
 
 ---
 
@@ -136,7 +184,7 @@ openai:
 
 | Option | Description |
 |--------|-------------|
-| `--provider` | Choose `ollama`, `lm_studio`, or `openai`. |
+| `--provider` | Choose `ollama`, `lm_studio`, `openai`, `gemini`, or `anthropic`. |
 | `--model` | Model name (e.g., `gpt-4o`, `qwen2.5-coder:7b`). |
 | `--config` | Path to a specific YAML config file. |
 | `--no-diff` | Skip showing the file diff preview. |
@@ -179,7 +227,7 @@ Learnings from successful runs (bug fixes, project patterns) are stored in `.age
 ### Cost Tracking & Budget Limits
 AgentChanti monitors your token usage and calculates costs for cloud providers.
 - **Budget Enforcment**: Set `budget_limit` in your config. The system will halt immediately if the limit is reached.
-- **Pricing Configuration**: Costs are calculated based on the `pricing` dictionary in your YAML. Default prices for OpenAI models are built-in.
+- **Pricing Configuration**: Costs are calculated based on the `pricing` dictionary in your YAML. Default prices for OpenAI, Gemini, and Claude models are built-in.
 - **Report Integration**: Total cost is displayed in both the terminal summary and the generated HTML reports.
 
 ---

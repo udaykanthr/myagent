@@ -267,7 +267,7 @@ def _console_diff_approval(diffs: list[tuple[str, str]],
         print("  \033[1;31mHAZARDS DETECTED! Safety confirmation required.\033[0m")
         print("  Type [CONFIRM] to approve, or [R]eject.")
     else:
-        print("  [A]pprove  |  [S]kip all (approve & don't ask again)  |  [R]eject")
+        print("  [A]pprove  |  [S] Always Approve (don't ask again)  |  [R]eject")
     print()
 
     while True:
@@ -275,7 +275,7 @@ def _console_diff_approval(diffs: list[tuple[str, str]],
             choice = input("  Your choice: ").strip()
         except (EOFError, KeyboardInterrupt):
             return False
-            
+
         if any_hazards:
             if choice == "CONFIRM":
                 return True
@@ -287,7 +287,7 @@ def _console_diff_approval(diffs: list[tuple[str, str]],
             choice = choice.lower()
             if choice in ("a", "approve"):
                 return True
-            elif choice in ("s", "skip"):
+            elif choice in ("s", "always"):
                 _approve_all = True
                 return True
             elif choice in ("r", "reject"):
@@ -384,7 +384,7 @@ def _textual_diff_approval(diffs: list[tuple[str, str]],
             Binding("ctrl+s", "approve", "Approve"),
             Binding("escape", "reject", "Reject"),
             Binding("r", "reject", "Reject"),
-            Binding("s", "approve_all", "Approve All"),
+            Binding("s", "approve_all", "Always Approve"),
         ]
 
         def __init__(self, diffs: list[tuple[str, str]],
@@ -454,7 +454,7 @@ def _textual_diff_approval(diffs: list[tuple[str, str]],
                 summary_parts.append(f"{len(self._new_files)} new")
             yield Static(
                 f"  {' | '.join(summary_parts)}  —  "
-                f"[bold]A[/bold] Approve  |  [bold]S[/bold] Approve All  |  "
+                f"[bold]A[/bold] Approve  |  [bold]S[/bold] Always Approve  |  "
                 f"[bold]R[/bold]/Esc Reject",
                 id="summary",
             )
@@ -468,7 +468,7 @@ def _textual_diff_approval(diffs: list[tuple[str, str]],
                         "✔ Approve", id="approve-btn", variant="success",
                     )
                 yield Button(
-                    "✔ Approve All", id="approve-all-btn", variant="warning",
+                    "✔ Always Approve", id="approve-all-btn", variant="warning",
                 )
                 yield Button(
                     "✕ Reject", id="reject-btn", variant="error",
@@ -526,7 +526,7 @@ def _console_diff_approval(diffs: list[tuple[str, str]],
         print(f"\n  New files: {', '.join(new_files)}")
 
     print("\n" + "=" * 60)
-    print("  [A]pprove  |  [S]kip all (approve & don't ask again)  |  [R]eject")
+    print("  [A]pprove  |  [S] Always Approve (don't ask again)  |  [R]eject")
     print()
 
     while True:

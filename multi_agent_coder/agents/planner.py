@@ -27,6 +27,7 @@ IMPORTANT RULES:
 - For steps that involve running shell commands (installing packages, running scripts, etc.), include the exact command in backticks.
 - All commands run non-interactively (no terminal input). Always include --yes, -y, or --defaults flags for tools that prompt for input (e.g. `npx create-next-app . --yes`, `npm init -y`).
 - Do NOT add test steps (writing tests or running tests) unless the user's task EXPLICITLY asks for tests. Never auto-generate test steps on your own.
+- CRITICAL — Existing files: When existing source files are shown in the "Existing Source Files" section above, you MUST plan to MODIFY those files rather than creating new ones. Reference the specific file paths (e.g., "Update `src/index.html` to add a navbar"). Only plan to create NEW files when the task genuinely requires new functionality that does not belong in any existing file.
 
 Example:
   1. Create a new utility function in `utils.py` for input validation

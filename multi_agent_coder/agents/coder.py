@@ -24,5 +24,9 @@ Rules:
 - CRITICAL: You are FORBIDDEN from editing `package.json`, `pyproject.toml`, or `go.mod` to add dependencies.
   ALWAYS use shell commands (`npm install`, `pip install`, `go get`) for dependencies.
   You may only edit these files to add/modify `scripts` or project metadata.
+- CRITICAL — Existing files: When existing files are provided in context (shown as [FILE]: sections above),
+  you MUST MODIFY them rather than creating new files from scratch. Output the COMPLETE updated file content
+  with your changes applied, preserving all unchanged code. Use the SAME file path as the existing file.
+  Only create a new file when the task explicitly requires a file that does not exist yet.
 """
         return self.llm_client.generate_response(prompt)

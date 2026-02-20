@@ -33,6 +33,7 @@ _DEFAULTS = {
     "embedding_cache_dir": ".agentchanti",
     "report_dir": ".agentchanti/reports",
     "step_cache_ttl_hours": 24,
+    "planner_context_chars": 6000,
     "plugins": [],
     "planner_suffix": "Do not create meta-steps (e.g., 'Review code', 'Identify issues'). Focus on implementation. Combine analysis and action.",
     "budget_limit": 0.0,
@@ -200,6 +201,11 @@ class Config:
                                          _DEFAULTS["step_cache_ttl_hours"],
                                          cast=int)
 
+        # Planner context size
+        self.PLANNER_CONTEXT_CHARS = _get(
+            "PLANNER_CONTEXT_CHARS", "planner_context_chars",
+            _DEFAULTS["planner_context_chars"], cast=int)
+
         # Budget and Pricing
         self.BUDGET_LIMIT = _get("BUDGET_LIMIT", "budget_limit",
                                  _DEFAULTS["budget_limit"], cast=float)
@@ -243,6 +249,7 @@ class Config:
             "embedding_cache_dir": self.EMBEDDING_CACHE_DIR,
             "report_dir": self.REPORT_DIR,
             "step_cache_ttl_hours": self.STEP_CACHE_TTL_HOURS,
+            "planner_context_chars": self.PLANNER_CONTEXT_CHARS,
             "plugins": self.PLUGINS,
             "budget_limit": self.BUDGET_LIMIT,
             "pricing": self.PRICING,

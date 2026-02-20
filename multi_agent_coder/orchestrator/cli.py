@@ -19,7 +19,7 @@ from ..language import (
     detect_language, detect_language_from_task, get_test_framework,
     get_language_name, get_code_block_lang,
 )
-from ..project_scanner import scan_project, format_scan_for_planner
+from ..project_scanner import scan_project, format_scan_for_planner, collect_source_files
 from ..checkpoint import (
     save_checkpoint, load_checkpoint, clear_checkpoint,
 )
@@ -173,8 +173,12 @@ def main():
 
     # ── 3. Scan existing project ──
     scan_result = scan_project(".")
-    project_context = format_scan_for_planner(scan_result)
-    log.info(f"Project scan: {scan_result['file_count']} files detected")
+    source_files = collect_source_files(".")
+    log.info(f"Project scan: {scan_result['file_count']} files detected, "
+             f"{len(source_files)} source files collected")
+    project_context = format_scan_for_planner(
+        scan_result, max_chars=cfg.PLANNER_CONTEXT_CHARS,
+        source_files=source_files)
 
     # ── 4. Init embedding store (SQLite-backed for persistence) ──
     embed_store = None
@@ -410,6 +414,12 @@ def main():
         log.info(f"Approved {len(steps)} steps.")
 
         memory = FileMemory(embedding_store=embed_store, top_k=cfg.EMBEDDING_TOP_K)
+
+        # Pre-load existing source files into memory so the coder
+        # can see and modify them instead of creating new files
+        if source_files:
+            memory.update(source_files)
+            log.info(f"Pre-loaded {len(source_files)} source files into memory")
 
     # ── 12. Build execution waves ──
     # Re-parse dependencies from current steps (they may have been cleaned)

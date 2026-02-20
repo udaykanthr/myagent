@@ -33,7 +33,7 @@ from .cli_display import CLIDisplay, token_tracker, log
 from .language import (
     detect_language, detect_language_from_task, get_language_name, get_code_block_lang,
 )
-from .project_scanner import scan_project, format_scan_for_planner
+from .project_scanner import scan_project, format_scan_for_planner, collect_source_files
 from .checkpoint import save_checkpoint, load_checkpoint, clear_checkpoint
 
 from .orchestrator.memory import FileMemory
@@ -141,7 +141,10 @@ def _run_task_impl(
 
     # Project scan
     scan_result = scan_project(".")
-    project_context = format_scan_for_planner(scan_result)
+    source_files = collect_source_files(".")
+    project_context = format_scan_for_planner(
+        scan_result, max_chars=cfg.PLANNER_CONTEXT_CHARS,
+        source_files=source_files)
 
     # Embedding store
     embed_store = None
@@ -180,6 +183,10 @@ def _run_task_impl(
     executor = Executor()
     display = CLIDisplay(task)
     memory = FileMemory(embedding_store=embed_store, top_k=cfg.EMBEDDING_TOP_K)
+
+    # Pre-load existing source files into memory
+    if source_files:
+        memory.update(source_files)
 
     # Plan
     planner_context = f"Existing project:\n{project_context}" if project_context else ""

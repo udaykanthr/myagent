@@ -85,18 +85,68 @@ class FileMemory:
         return "\n\n".join(parts)
 
     def _substring_context(self, step_text: str, max_tokens: int | None) -> str:
+        """Score-based fallback matching when embeddings are unavailable.
+
+        Scoring:
+        1. Exact path/filename match in step text  → 100 pts
+        2. File name keyword match (stem words)     → 50 pts
+        3. Extension keyword match (e.g. "HTML")    → 10 pts
+        """
+        import os
+        import re
+        step_lower = step_text.lower()
+
+        scored: list[tuple[int, str, str]] = []  # (score, fpath, content)
+        for fpath, content in self._files.items():
+            score = 0
+            basename = fpath.rsplit('/', 1)[-1].rsplit('\\', 1)[-1]
+            stem, ext = os.path.splitext(basename)
+
+            # Exact path or basename match
+            if fpath in step_text or basename in step_text:
+                score += 100
+
+            # Keyword match: stem parts in step text
+            # e.g. "login_page.html" → ["login", "page"]
+            stem_parts = [p for p in stem.replace("-", "_").split("_") if len(p) > 2]
+            for part in stem_parts:
+                if part.lower() in step_lower:
+                    score += 50
+                    break  # one keyword match is enough
+
+            # Extension keyword match: e.g. "HTML" in step text matches .html
+            # Only match as a standalone word (not inside filenames like "utils.py")
+            if ext:
+                ext_name = ext.lstrip(".").lower()
+                if re.search(r'\b' + re.escape(ext_name) + r'\b', step_lower):
+                    # Exclude matches that are part of a filename (e.g. "utils.py")
+                    # by checking if the match is preceded by a dot
+                    matches = list(re.finditer(r'\b' + re.escape(ext_name) + r'\b', step_lower))
+                    has_standalone = any(
+                        m.start() == 0 or step_lower[m.start() - 1] != '.'
+                        for m in matches
+                    )
+                    if has_standalone:
+                        score += 10
+
+            if score > 0:
+                scored.append((score, fpath, content))
+
+        # Sort by score descending
+        scored.sort(key=lambda x: x[0], reverse=True)
+
         parts: list[str] = []
         budget = max_tokens or float("inf")
         used = 0
-        for fpath, content in self._files.items():
-            basename = fpath.rsplit('/', 1)[-1].rsplit('\\', 1)[-1]
-            if basename in step_text or fpath in step_text:
-                entry = f"#### [FILE]: {fpath}\n```\n{content}\n```"
-                entry_tokens = _estimate_tokens(entry)
-                if used + entry_tokens > budget:
-                    break
-                parts.append(entry)
-                used += entry_tokens
+        for _score, fpath, content in scored:
+            entry = f"#### [FILE]: {fpath}\n```\n{content}\n```"
+            entry_tokens = _estimate_tokens(entry)
+            if used + entry_tokens > budget:
+                break
+            parts.append(entry)
+            used += entry_tokens
+        log.debug(f"[FileMemory] Substring fallback returned {len(parts)} files "
+                  f"({used} est. tokens)")
         return "\n\n".join(parts)
 
     def summary(self) -> str:

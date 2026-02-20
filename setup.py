@@ -8,7 +8,6 @@ setup(
         "requests",
         "pyyaml",
         "textual",
-        'windows-curses; sys_platform == "win32"',
     ],
     entry_points={
         "console_scripts": [

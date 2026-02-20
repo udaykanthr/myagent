@@ -5,7 +5,9 @@
       "Bash(python -m multi_agent_coder.orchestrator:*)",
       "Bash(findstr:*)",
       "Bash(python -m pytest:*)",
-      "Bash(python -m multi_agent_coder:*)"
+      "Bash(python -m multi_agent_coder:*)",
+      "Bash(pip index:*)",
+      "Bash(pip install:*)"
     ]
   }
 }

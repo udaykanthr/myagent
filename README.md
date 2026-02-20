@@ -107,7 +107,7 @@ chmod +x install.sh
 
 **Windows:**
 ```cmd
-install.bat
+./install.bat
 ```
 
 ### Option 2: Manual Install
@@ -120,7 +120,7 @@ cd myagent
 # (Optional) Create a virtual environment
 python -m venv .venv
 source .venv/bin/activate        # Linux/macOS
-# .venv\Scripts\activate         # Windows
+.venv\Scripts\activate         # Windows
 
 # Install in editable mode
 pip install -e .

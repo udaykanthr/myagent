@@ -62,6 +62,12 @@ def _looks_like_command(text: str) -> bool:
     # Reject bare file paths
     if _is_file_path(text):
         return False
+
+    # Reject lines that look like Ruby/Gemfile DSL rather than shell commands.
+    # e.g. "source 'https://rubygems.org'", "gem 'rspec'", "gem 'rails', '~> 7.0'"
+    if re.match(r"^(source|gem|group|require)\s+['\"]", text):
+        return False
+
     # Extract the first token, splitting on whitespace AND shell operators
     # so that "echo.>file" splits to "echo." and "type nul > file" splits to "type"
     first_token = re.split(r'[\s>|&;<]', text)[0].lower()

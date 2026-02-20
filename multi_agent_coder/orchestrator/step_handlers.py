@@ -558,6 +558,18 @@ def _handle_test_step(step_text: str, tester: TesterAgent, coder: CoderAgent,
                 break
             prev_output = output
 
+            # Detect system-level / environment failures early — these
+            # can't be fixed by editing code (e.g. missing Gemfile,
+            # missing runtime, missing package manager).
+            from .pipeline import _detect_system_level_failure
+            sys_issue = _detect_system_level_failure(output)
+            if sys_issue:
+                msg = (f"System dependency missing: {sys_issue}. "
+                       f"Cannot fix by editing code.")
+                display.step_info(step_idx, msg)
+                log.error(f"Step {step_idx+1}: {msg}")
+                return False, msg
+
             # If test runner itself is not installed, try to install it
             if "not installed" in output or "not on PATH" in output:
                 runner_parts = test_cmd.split()

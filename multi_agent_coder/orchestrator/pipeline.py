@@ -66,6 +66,56 @@ def _detect_external_service_failure(error_info: str) -> str | None:
     return None
 
 
+# ── System-level / environment issue detection ────────────────
+# Patterns that indicate the failure is due to missing system tools,
+# runtimes, or project setup files — NOT a code bug.  The agent
+# cannot fix these by editing source files.
+
+_SYSTEM_LEVEL_PATTERNS: list[tuple[str, str]] = [
+    # Ruby / Bundler
+    (r'Could not locate Gemfile', 'Bundler (no Gemfile found — run `bundle init` or create a Gemfile)'),
+    (r'bundler:?\s+command not found|bundle:?\s+command not found',
+     'Bundler (install with `gem install bundler`)'),
+    (r"ruby:?\s+command not found|ruby:?\s+is not recognized",
+     'Ruby runtime (install Ruby from https://www.ruby-lang.org)'),
+    # Python
+    (r'python3?:?\s+command not found|python3?:?\s+is not recognized',
+     'Python runtime'),
+    (r'pip3?:?\s+command not found|pip3?:?\s+is not recognized',
+     'pip (Python package manager)'),
+    # Node.js / npm
+    (r'node:?\s+command not found|node:?\s+is not recognized',
+     'Node.js runtime (install from https://nodejs.org)'),
+    (r'npm:?\s+command not found|npm:?\s+is not recognized',
+     'npm (install Node.js from https://nodejs.org)'),
+    # Java
+    (r'javac?:?\s+command not found|javac?:?\s+is not recognized',
+     'Java SDK (install JDK)'),
+    (r'mvn:?\s+command not found', 'Maven (install Apache Maven)'),
+    (r'gradle:?\s+command not found', 'Gradle (install Gradle)'),
+    # .NET
+    (r'dotnet:?\s+command not found|dotnet:?\s+is not recognized',
+     '.NET SDK (install from https://dotnet.microsoft.com)'),
+    # Docker
+    (r'docker:?\s+command not found|docker:?\s+is not recognized',
+     'Docker (install Docker Desktop)'),
+    # Generic: "X is not recognized as an internal or external command" (Windows)
+    (r"'[^']+' is not recognized as an internal or external command",
+     'a required system tool (see error message above)'),
+]
+
+
+def _detect_system_level_failure(error_info: str) -> str | None:
+    """Check if an error is caused by a missing system tool or environment setup.
+
+    Returns a human-readable description if detected, ``None`` otherwise.
+    """
+    for pattern, description in _SYSTEM_LEVEL_PATTERNS:
+        if re.search(pattern, error_info, re.IGNORECASE):
+            return description
+    return None
+
+
 def build_step_waves(steps: list[str], dependencies: dict[int, set[int]]) -> list[list[int]]:
     """Group step indices into execution waves using topological ordering.
 
@@ -175,6 +225,20 @@ def _run_diagnosis_loop(step_idx: int, step_text: str, error_info: str, *,
         log.warning(f"Task {step_idx+1}: Skipping diagnosis — "
                     f"this is not a code issue.")
         display.complete_step(step_idx, "skipped")
+        return False
+
+    # ── Early exit: missing system tool / environment setup ─────
+    # If the failure is because a runtime, package manager, or project
+    # config file is missing, editing code won't help.
+    sys_issue = _detect_system_level_failure(error_info)
+    if sys_issue:
+        msg = (f"System dependency missing: {sys_issue}. "
+               f"Please install the required tool and re-run the pipeline.")
+        display.step_info(step_idx, msg)
+        log.warning(f"Task {step_idx+1}: System-level issue: {sys_issue}")
+        log.warning(f"Task {step_idx+1}: Skipping diagnosis — "
+                    f"this is an environment issue, not a code bug.")
+        display.complete_step(step_idx, "failed")
         return False
 
     for diag_attempt in range(1, MAX_DIAGNOSIS_RETRIES + 1):

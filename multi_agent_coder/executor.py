@@ -114,6 +114,12 @@ class Executor:
         name = name.lstrip('/')
         name = name.strip()
 
+        # Strip duplicate directory prefixes: my-app/my-app/src → my-app/src
+        if '/' in name:
+            segments = name.split('/')
+            if len(segments) >= 2 and segments[0] == segments[1]:
+                name = '/'.join(segments[1:])
+
         # Reject if too long (real filenames rarely exceed 200 chars)
         if len(name) > 200:
             return ""
@@ -327,6 +333,9 @@ class Executor:
         written = []
         init_dirs: set[str] = set()
 
+        # Track basenames we've already written to detect path conflicts
+        written_basenames: dict[str, str] = {}  # basename → full relative path
+
         for filename, content in files.items():
             filepath = os.path.join(base_dir, filename)
             dirpath = os.path.dirname(filepath)
@@ -337,6 +346,14 @@ class Executor:
                 log.warning(f"[Executor] Skipping protected file: {filepath} "
                             f"(already exists — overwriting could corrupt dependencies)")
                 continue
+
+            # Warn about potential path conflicts (same basename, different dir)
+            if basename in written_basenames:
+                prev_path = written_basenames[basename]
+                if prev_path != filename:
+                    log.warning(f"[Executor] Path conflict: '{filename}' has same "
+                                f"basename as already-written '{prev_path}'")
+            written_basenames[basename] = filename
             if dirpath:
                 os.makedirs(dirpath, exist_ok=True)
             with open(filepath, "w", encoding="utf-8") as f:

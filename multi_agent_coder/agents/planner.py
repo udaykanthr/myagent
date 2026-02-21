@@ -13,27 +13,76 @@ def _shell_example() -> str:
 class PlannerAgent(Agent):
     def process(self, task: str, context: str = "") -> str:
         prompt = self._build_prompt(task, context)
-        prompt += f"""
+        prompt += """
 
-Provide a step-by-step plan as a numbered list.
-Keep each step short and actionable. Do NOT include code in this plan.
+You are a SENIOR SOFTWARE ARCHITECT creating an execution plan that will be
+carried out by an automated pipeline. Each step is executed by one of three
+agents: a CODER (writes files), a CMD runner (executes shell commands), or a
+TESTER (generates and runs unit tests). Your plan MUST be precise enough for
+these agents to succeed on the first attempt.
 
-IMPORTANT RULES:
-- Base your plan ONLY on the project context provided above.
-- Do NOT add meta-steps like "Review code", "Identify issues", "Analyze project structure", or "List files".
-- The project context is already provided to you; go straight to implementation or modification steps.
-- Combine "Identify" and "Fix" into a single actionable step (e.g., "Fix the logic in X" instead of "Identify bug in X" followed by "Fix bug in X").
-- Each step should produce a concrete, verifiable result.
-- For steps that involve running shell commands (installing packages, running scripts, etc.), include the exact command in backticks.
-- All commands run non-interactively (no terminal input). Always include --yes, -y, or --defaults flags for tools that prompt for input (e.g. `npx create-next-app . --yes`, `npm init -y`).
-- Do NOT add test steps (writing tests or running tests) unless the user's task EXPLICITLY asks for tests. Never auto-generate test steps on your own.
-- CRITICAL — Existing files: When existing source files are shown in the "Existing Source Files" section above, you MUST plan to MODIFY those files rather than creating new ones. Reference the specific file paths (e.g., "Update `src/index.html` to add a navbar"). Only plan to create NEW files when the task genuinely requires new functionality that does not belong in any existing file.
+═══════ STEP FORMAT ═══════
+Write a numbered list. Each step MUST be a single, concrete action:
 
-Example:
-  1. Create a new utility function in `utils.py` for input validation
-  2. Update the API endpoint in `app.py` to use the new validation (depends: 1)
+  1. Install dependencies with `npm install express cors` (depends: none)
+  2. Create the Express server in `src/server.js` with GET /api/health endpoint (depends: 1)
+  3. Add input validation utility in `src/utils/validate.js` (depends: 1)
+  4. Update `src/server.js` to use validation from `src/utils/validate.js` (depends: 2, 3)
 
-For each step, if it depends on a previous step being completed first, add (depends: N) or (depends: N, M) at the end of the step.
-Steps with no dependencies can run in parallel.
+═══════ STEP RULES (CRITICAL) ═══════
+
+1. **Reference EXACT file paths**: Every CODE step must name the specific
+   file(s) to create or modify. Use the paths from the project context above.
+   Say "Update `src/index.js`" NOT "Update the main file".
+
+2. **One action per step**: Each step should do ONE thing. Don't combine
+   "create file AND install package" in one step. Split them.
+
+3. **CMD steps for shell commands**: Installing packages, running scripts,
+   creating directories — put the exact command in backticks.
+   Examples: `npm install express`, `pip install flask`, `mkdir -p src/utils`
+
+4. **CODE steps for file changes**: Creating or modifying source files.
+   Always specify the file path. For modifications, say "Update `path/to/file`"
+   and describe WHAT to change.
+
+5. **Existing files = MODIFY, not recreate**: When files already exist in the
+   project (shown in context above), plan to UPDATE them. Reference their
+   exact paths. Do NOT plan to create a file that already exists.
+
+6. **Dependencies between steps**: Add `(depends: N)` or `(depends: N, M)` at
+   the end of steps that need prior steps completed first. Steps without
+   dependencies can run in parallel.
+
+7. **Logical ordering**: Dependencies first, then dependents:
+   - Install packages → Write code that uses them
+   - Create utility files → Write code that imports them
+   - Write source code → Write tests for it
+
+8. **NO meta-steps**: Do NOT include steps like "Analyze the project",
+   "Review the code", "Identify the bug", or "Plan the implementation".
+   Jump straight to actionable steps.
+
+9. **NO test steps unless asked**: Do NOT add test steps (writing or running
+   tests) UNLESS the user's task EXPLICITLY asks for tests.
+
+10. **Shell commands are non-interactive**: Always include --yes, -y, or
+    --defaults flags for tools that prompt for input:
+    - `npx create-next-app . --yes`
+    - `npm init -y`
+    - `ng new myapp --defaults`
+
+═══════ QUALITY CHECKLIST (verify before outputting) ═══════
+- [ ] Every file path in the plan matches an existing project file OR is
+      clearly marked as a new file to create
+- [ ] No two steps create/modify the same file (consolidate into one step)
+- [ ] Import dependencies: if step N creates a module that step M imports,
+      M depends on N
+- [ ] Package dependencies: if step N installs a package that step M uses,
+      M depends on N
+- [ ] No vague steps ("improve the code", "fix issues", "update as needed")
+- [ ] Each step is specific enough that a developer could execute it without
+      asking questions
+- [ ] Total steps are between 2-15 (break large tasks down, but don't over-split)
 """
         return self.llm_client.generate_response(prompt)

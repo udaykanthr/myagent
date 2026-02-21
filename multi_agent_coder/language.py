@@ -51,6 +51,13 @@ TEST_FRAMEWORKS = {
         "ext": ".js",
         "prefix": "",
         "suffix": ".test",
+        "setup_cmd": "npm install --save-dev jest",
+        "config_note": (
+            "Jest must be listed in devDependencies. "
+            "If package.json has `\"type\": \"module\"`, tests must use "
+            "`import/export` syntax. Otherwise, use `require()/module.exports`. "
+            "Use relative paths from the test file to the source file."
+        ),
     },
     "typescript": {
         "command": "npx jest --forceExit --watchAll=false",
@@ -58,6 +65,12 @@ TEST_FRAMEWORKS = {
         "ext": ".ts",
         "prefix": "",
         "suffix": ".test",
+        "setup_cmd": "npm install --save-dev jest ts-jest @types/jest",
+        "config_note": (
+            "TypeScript projects need ts-jest or @swc/jest configured. "
+            "Ensure jest.config has `transform` set for .ts files. "
+            "Use `import/export` syntax in test files."
+        ),
     },
     "go": {
         "command": "go test ./...",

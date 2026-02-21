@@ -1,6 +1,8 @@
 """
 Step handlers — CMD, CODE, and TEST step execution logic.
 """
+# Separate retry limit for test generation (lower than code to avoid pipeline halts)
+MAX_TEST_GEN_RETRIES = 2
 
 import os
 import shutil
@@ -19,7 +21,7 @@ from .classification import _extract_command_from_step
 from ..diff_display import show_diffs, prompt_diff_approval, _detect_hazards
 
 
-MAX_STEP_RETRIES = 3
+MAX_STEP_RETRIES = 3  # Used for code steps and test run/fix attempts
 
 # Map test runner binary → install command
 _RUNNER_INSTALL = {
@@ -439,6 +441,109 @@ def _handle_code_step(step_text: str, coder: CoderAgent, reviewer: ReviewerAgent
     return False, f"Code step failed after {MAX_STEP_RETRIES} attempts.\nLast review feedback:\n{feedback}"
 
 
+def _normalize_fix_paths(fix_files: dict[str, str],
+                        memory: FileMemory) -> dict[str, str]:
+    """Correct LLM-generated paths that are suffixes of known project paths.
+
+    Example: if memory has ``my-app/src/index.js`` and the LLM outputs
+    ``src/index.js``, remap to the full path.
+    """
+    known_paths = set(memory.all_files().keys())
+    if not known_paths:
+        return fix_files
+
+    corrected: dict[str, str] = {}
+    for fpath, content in fix_files.items():
+        if fpath in known_paths:
+            corrected[fpath] = content
+            continue
+
+        # Check if fpath is a suffix of an existing known path
+        matched = None
+        for known in known_paths:
+            if known.endswith('/' + fpath) or known.endswith('\\' + fpath):
+                matched = known
+                break
+
+        if matched:
+            log.warning(f"[PathFix] Remapped '{fpath}' → '{matched}' "
+                        f"(matched existing project file)")
+            corrected[matched] = content
+        else:
+            corrected[fpath] = content
+
+    return corrected
+
+
+def _filter_test_only_files(fix_files: dict[str, str],
+                            test_files: dict[str, str],
+                            memory: FileMemory) -> dict[str, str]:
+    """Filter fix files to only allow test files during test fix loop.
+
+    Blocks writes to:
+    - Protected manifest files (package.json, etc.)
+    - Source files that already exist in memory (prevents overwrite)
+
+    Allows writes to:
+    - Files that were part of the original test_files
+    - Files in test directories (__tests__/, tests/, spec/, test/)
+    - Files with test naming patterns (test_*, *.test.*, *_test.*, *_spec.*)
+    """
+    import re
+    import os
+
+    allowed: dict[str, str] = {}
+    known_source_files = set(memory.all_files().keys())
+    test_paths = set(test_files.keys())
+
+    # Patterns for test files
+    _TEST_DIR_PATTERNS = {'__tests__', 'tests', 'test', 'spec'}
+    _TEST_NAME_RE = re.compile(
+        r'(^test_|[./]test[./]|\.test\.|_test\.|_spec\.|spec[./])',
+        re.IGNORECASE
+    )
+
+    for fpath, content in fix_files.items():
+        basename = os.path.basename(fpath)
+
+        # Block: protected manifest files
+        if basename in Executor._PROTECTED_FILENAMES:
+            log.warning(f"[TestFix] Blocked write to protected file: {fpath}")
+            continue
+
+        # Allow: file was in original test_files
+        if fpath in test_paths:
+            allowed[fpath] = content
+            continue
+
+        # Allow: file is in a test directory
+        path_parts = set(fpath.replace('\\', '/').split('/'))
+        if path_parts & _TEST_DIR_PATTERNS:
+            allowed[fpath] = content
+            continue
+
+        # Allow: file matches test naming pattern
+        if _TEST_NAME_RE.search(fpath):
+            allowed[fpath] = content
+            continue
+
+        # Block: file is a known source file in memory
+        if fpath in known_source_files:
+            log.warning(f"[TestFix] Blocked write to source file during "
+                        f"test fix: {fpath}")
+            continue
+
+        # Default: allow unknown new files (might be test helpers)
+        allowed[fpath] = content
+
+    blocked_count = len(fix_files) - len(allowed)
+    if blocked_count > 0:
+        log.info(f"[TestFix] Blocked {blocked_count} non-test file(s) "
+                 f"from test fix write")
+
+    return allowed
+
+
 def _handle_test_step(step_text: str, tester: TesterAgent, coder: CoderAgent,
                       reviewer: ReviewerAgent, executor: Executor,
                       task: str, memory: FileMemory,
@@ -477,9 +582,10 @@ def _handle_test_step(step_text: str, tester: TesterAgent, coder: CoderAgent,
 
     feedback = ""
     last_test_output = ""
+    prev_gen_error = None  # Track errors across gen attempts for early exit
 
-    for gen_attempt in range(1, MAX_STEP_RETRIES + 1):
-        display.step_info(step_idx, f"Generating tests (attempt {gen_attempt})...")
+    for gen_attempt in range(1, MAX_TEST_GEN_RETRIES + 1):
+        display.step_info(step_idx, f"Generating tests (attempt {gen_attempt}/{MAX_TEST_GEN_RETRIES})...")
         gen_context = f"Code:\n{code_summary}"
         if feedback:
             gen_context += f"\nFeedback: {feedback}"
@@ -499,8 +605,20 @@ def _handle_test_step(step_text: str, tester: TesterAgent, coder: CoderAgent,
 
         test_files = executor.parse_code_blocks(test_response)
         if not test_files:
+            test_files = executor.parse_code_blocks_fuzzy(test_response)
+        if not test_files:
             feedback = "No test files found. Use #### [FILE]: format."
             display.step_info(step_idx, "No test files parsed, retrying...")
+            continue
+
+        # Normalize paths: fix LLM-generated paths that are suffixes of known files
+        test_files = _normalize_fix_paths(test_files, memory)
+
+        # Filter: only allow test files (block any source/config files)
+        test_files = _filter_test_only_files(test_files, test_files, memory)
+        if not test_files:
+            feedback = "Generated files were all non-test files. Generate ONLY test files."
+            display.step_info(step_idx, "No valid test files after filtering, retrying...")
             continue
 
         # Review tests
@@ -531,7 +649,7 @@ def _handle_test_step(step_text: str, tester: TesterAgent, coder: CoderAgent,
         ))
 
         # On last attempt, accept if no critical issues found
-        if not test_approved and gen_attempt == MAX_STEP_RETRIES:
+        if not test_approved and gen_attempt == MAX_TEST_GEN_RETRIES:
             has_critical = any(kw in review_lower for kw in (
                 "error", "bug", "crash", "undefined", "missing import",
                 "will fail", "won't work", "incorrect", "wrong import",
@@ -634,19 +752,39 @@ def _handle_test_step(step_text: str, tester: TesterAgent, coder: CoderAgent,
                 else:
                     log.warning(f"Step {step_idx+1}: Package install failed: {install_out}")
 
+            # Early exit: if the same error repeats across gen attempts,
+            # the fix isn't working — break to avoid wasting LLM calls
+            if prev_gen_error and output == prev_gen_error:
+                display.step_info(step_idx,
+                                  "Same test error repeating across attempts — stopping.")
+                log.warning(f"Step {step_idx+1}: Identical test error across gen "
+                            f"attempts, breaking retry loop.")
+                break
+            prev_gen_error = output
+
             display.step_info(step_idx, "Tests failed, asking coder to fix...")
             error_detail = output[:500] if output else f"(command `{test_cmd}` produced no output — it may have crashed or the test framework may not be installed)"
+
+            # Build a more specific fix prompt that restricts changes to test files
+            test_file_list = ", ".join(test_files.keys())
             fix_context = (
                 f"Test command: `{test_cmd}`\n"
                 f"Test errors:\n{error_detail}\n"
+                f"Test files that need fixing: {test_file_list}\n"
                 f"Project files:\n{code_summary}"
+            )
+            fix_prompt = (
+                "Fix ONLY the test files so tests pass. "
+                "Do NOT modify source files, package.json, or any config files. "
+                "Do NOT add new dependencies. "
+                "Only output the corrected test file(s) using #### [FILE]: format."
             )
 
             sent_before = token_tracker.total_prompt_tokens
             recv_before = token_tracker.total_completion_tokens
 
             fix_response = coder.process(
-                "Fix the code so tests pass.", context=fix_context, language=language)
+                fix_prompt, context=fix_context, language=language)
 
             sent_delta = token_tracker.total_prompt_tokens - sent_before
             recv_delta = token_tracker.total_completion_tokens - recv_before
@@ -657,10 +795,20 @@ def _handle_test_step(step_text: str, tester: TesterAgent, coder: CoderAgent,
                 display.add_llm_log(explanation, source="Coder")
 
             fix_files = executor.parse_code_blocks(fix_response)
+            if not fix_files:
+                fix_files = executor.parse_code_blocks_fuzzy(fix_response)
             if fix_files:
-                show_diffs(fix_files, log_only=True)
-                executor.write_files(fix_files)
-                memory.update(fix_files)
+                # Normalize paths and filter to test-only files
+                fix_files = _normalize_fix_paths(fix_files, memory)
+                fix_files = _filter_test_only_files(
+                    fix_files, test_files, memory)
+                if fix_files:
+                    show_diffs(fix_files, log_only=True)
+                    executor.write_files(fix_files)
+                    memory.update(fix_files)
+                else:
+                    log.warning(f"Step {step_idx+1}: All fix files were "
+                                f"blocked by test-only filter")
                 code_summary = ""
                 for fname, content in memory.all_files().items():
                     code_summary += f"#### [FILE]: {fname}\n```{lang_tag}\n{content}\n```\n\n"
@@ -668,5 +816,5 @@ def _handle_test_step(step_text: str, tester: TesterAgent, coder: CoderAgent,
         log.error(f"Step {step_idx+1}: Tests still failing after {MAX_STEP_RETRIES} fixes.")
         return False, f"Tests still failing after {MAX_STEP_RETRIES} fix attempts.\nLast test output:\n{last_test_output}"
 
-    log.error(f"Step {step_idx+1}: Could not generate valid tests after {MAX_STEP_RETRIES} attempts.")
-    return False, f"Could not generate valid tests after {MAX_STEP_RETRIES} attempts.\nLast feedback:\n{feedback}"
+    log.error(f"Step {step_idx+1}: Could not generate valid tests after {MAX_TEST_GEN_RETRIES} attempts.")
+    return False, f"Could not generate valid tests after {MAX_TEST_GEN_RETRIES} attempts.\nLast feedback:\n{feedback}"

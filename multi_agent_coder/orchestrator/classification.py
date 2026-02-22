@@ -106,11 +106,18 @@ def _extract_commands_from_text(text: str) -> list[str]:
     # 1. Triple-backtick code blocks (```lang\n...\n```)
     for m in re.finditer(r"```(?:\w*)\n(.*?)```", text, re.DOTALL):
         block = m.group(1).strip()
-        for line in block.splitlines():
-            line = line.strip()
-            if line and _looks_like_command(line) and line not in seen:
-                commands.append(line)
-                seen.add(line)
+        # Heredoc blocks (cat << 'EOF' ... EOF) must stay as a single command;
+        # splitting them line-by-line destroys the file content.
+        if re.search(r'<<-?\s*[\'"]?(\w+)[\'"]?', block):
+            if block not in seen:
+                commands.append(block)
+                seen.add(block)
+        else:
+            for line in block.splitlines():
+                line = line.strip()
+                if line and _looks_like_command(line) and line not in seen:
+                    commands.append(line)
+                    seen.add(line)
 
     # 2. Single-backtick inline commands (`...`)
     for m in re.finditer(r"(?<!`)`([^`\n]+)`(?!`)", text):

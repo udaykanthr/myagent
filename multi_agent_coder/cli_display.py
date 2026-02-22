@@ -629,17 +629,68 @@ class CLIDisplay:
         self.render()
 
     def finish(self, success: bool = True):
+        """Render a full completion screen with header and centred report."""
         self._stop_spinner()
-        G = self.C_GREEN; RED = self.C_RED; D = self.C_DIM; R = self.C_RESET
-        self._move_to(self.term_height - 3)
+        self._refresh_size()
+        w = self.term_width
+        h = self.term_height
+        O = self.C_ORANGE; D = self.C_DIM; W = self.C_WHITE
+        G = self.C_GREEN; RED = self.C_RED; C = self.C_CYAN
+        Y = self.C_YELLOW; B = self.C_BOLD; R = self.C_RESET
+
+        # ── Clear and redraw header ──
+        os.system('cls' if os.name == 'nt' else 'clear')
+
+        brand_text = "Agent Chanti"
+        sub_text = "\u2501\u2501 Local Coder \u2501\u2501"
+
+        self._move_to(1)
+        print(f"{O}{'═' * w}{R}")
+        print(self._ansi_center(f"{O}{B}{brand_text}{R}"))
+        print(self._ansi_center(f"{D}{sub_text}{R}"))
+        print(f"{O}{'═' * w}{R}")
+
+        header_end = 4
+
+        # ── Build report lines ──
+        t = token_tracker
+        report_lines: list[str] = []
+
+        # Line 1: success / fail status
         if success:
-            msg = f"{G}✔  All steps processed successfully!{R}"
-            if token_tracker.total_cost > 0:
-                msg += f"  {D}(Total Cost: ${token_tracker.total_cost:.4f}){R}"
-            print(self._ansi_center(msg))
+            status_line = f"{G}✔  All tasks completed successfully!{R}"
         else:
-            print(self._ansi_center(f"{RED}✘  Some steps failed. Check logs for details.{R}"))
-        print()
+            status_line = f"{RED}✘  Some tasks failed. Check logs for details.{R}"
+        report_lines.append(status_line)
+
+        # Blank spacer
+        report_lines.append("")
+
+        # Line 2+: token & cost summary
+        token_line = (
+            f"{D}Total Tokens:{R} {C}{t.total_tokens:,}{R}    "
+            f"{D}Input Tokens:{R} {W}{t.total_prompt_tokens:,}{R}    "
+            f"{D}Output Tokens:{R} {W}{t.total_completion_tokens:,}{R}"
+        )
+        report_lines.append(token_line)
+
+        if t.total_cost > 0:
+            cost_line = f"{D}Estimated Cost:{R} {G}${t.total_cost:.4f}{R}"
+            report_lines.append(cost_line)
+
+        # ── Centre the block vertically in the remaining space ──
+        avail = h - header_end - 2  # leave 2 rows margin at bottom
+        block_height = len(report_lines)
+        start_row = header_end + max((avail - block_height) // 2, 1)
+
+        for i, line in enumerate(report_lines):
+            self._move_to(start_row + i)
+            sys.stdout.write("\033[2K")  # clear line
+            sys.stdout.write(self._ansi_center(line))
+
+        # Park cursor below the block
+        self._move_to(start_row + block_height + 1)
+        sys.stdout.flush()
 
     def budget_check(self, limit: float) -> bool:
         """Check if total cost exceeds limit. Returns True if over budget."""

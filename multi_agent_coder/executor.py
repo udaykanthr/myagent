@@ -659,6 +659,19 @@ class Executor:
 
     # ── Missing-package auto-install ──
 
+    # JS/TS: globals that need explicit import in ESM projects
+    _JS_GLOBAL_TO_IMPORT: dict[str, str] = {
+        "expect": "@jest/globals",
+        "describe": "@jest/globals",
+        "test": "@jest/globals",
+        "it": "@jest/globals",
+        "beforeEach": "@jest/globals",
+        "afterEach": "@jest/globals",
+        "beforeAll": "@jest/globals",
+        "afterAll": "@jest/globals",
+        "jest": "@jest/globals",
+    }
+
     # Well-known module → pip-package mappings where the names differ
     _MODULE_TO_PACKAGE = {
         "cv2": "opencv-python",
@@ -693,12 +706,13 @@ class Executor:
 
     @staticmethod
     def detect_missing_packages(test_output: str) -> List[str]:
-        """Parse test output and return a list of pip packages to install.
+        """Parse test output and return a list of packages to install.
 
         Detects:
         - ``ModuleNotFoundError: No module named 'xyz'``
         - ``ImportError: No module named 'xyz'``
         - ``fixture 'xyz' not found`` (pytest plugin fixtures)
+        - ``ReferenceError: X is not defined`` (JS/TS missing globals)
         """
         packages: list[str] = []
         seen: set[str] = set()
@@ -718,6 +732,17 @@ class Executor:
         for m in re.finditer(r"fixture ['\"](\w+)['\"] not found", test_output):
             fixture = m.group(1)
             pkg = Executor._FIXTURE_TO_PACKAGE.get(fixture)
+            if pkg and pkg not in seen:
+                packages.append(pkg)
+                seen.add(pkg)
+
+        # JS/TS: ReferenceError for missing globals (expect, describe, etc.)
+        for m in re.finditer(
+            r"ReferenceError:\s*(\w+)\s+is not defined",
+            test_output,
+        ):
+            name = m.group(1)
+            pkg = Executor._JS_GLOBAL_TO_IMPORT.get(name)
             if pkg and pkg not in seen:
                 packages.append(pkg)
                 seen.add(pkg)

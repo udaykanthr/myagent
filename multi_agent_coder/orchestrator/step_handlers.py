@@ -4,6 +4,7 @@ Step handlers — CMD, CODE, and TEST step execution logic.
 # Separate retry limit for test generation (lower than code to avoid pipeline halts)
 MAX_TEST_GEN_RETRIES = 2
 
+import json
 import os
 import shutil
 
@@ -46,7 +47,344 @@ def _get_runner_install_cmd(runner: str) -> str | None:
     return _RUNNER_INSTALL.get(runner, f"pip install {runner}")
 
 
+def _read_js_project_env() -> dict:
+    """Read package.json and project config to detect JS/TS environment.
+
+    Returns a dict with:
+        is_esm: bool       — True if package.json has "type": "module"
+        has_jest: bool      — True if jest is in dependencies/devDependencies
+        has_jest_globals: bool — True if @jest/globals is installed
+        has_jest_config: bool — True if jest.config.* exists
+        module_type: str    — "module" or "commonjs"
+    """
+    env = {
+        "is_esm": False,
+        "has_jest": False,
+        "has_jest_globals": False,
+        "has_jest_config": False,
+        "module_type": "commonjs",
+    }
+
+    # Read package.json
+    pkg_path = "package.json"
+    if os.path.isfile(pkg_path):
+        try:
+            with open(pkg_path, "r", encoding="utf-8") as f:
+                pkg = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return env
+
+        # ESM detection
+        if pkg.get("type") == "module":
+            env["is_esm"] = True
+            env["module_type"] = "module"
+
+        # Jest in dependencies
+        all_deps = {}
+        all_deps.update(pkg.get("dependencies", {}))
+        all_deps.update(pkg.get("devDependencies", {}))
+        env["has_jest"] = "jest" in all_deps
+        env["has_jest_globals"] = "@jest/globals" in all_deps
+
+    # Jest config detection
+    for config_name in ("jest.config.js", "jest.config.ts", "jest.config.mjs",
+                        "jest.config.cjs", "jest.config.json"):
+        if os.path.isfile(config_name):
+            env["has_jest_config"] = True
+            break
+
+    return env
+
+
 import platform
+
+
+def _strip_protected_files(files: dict[str, str]) -> dict[str, str]:
+    """Handle protected manifest files from parsed LLM output.
+
+    For lock files (package-lock.json, yarn.lock, etc.) — fully blocked.
+    For mergeable manifests (package.json, requirements.txt, etc.) — attempts
+    smart merge: new dependencies/scripts are merged in, removals and version
+    changes are blocked.  Falls back to full block on parse errors.
+
+    Files are only protected when they already exist on disk (new projects
+    need to create them initially).
+    """
+    if not files:
+        return files
+
+    # Lock files that should NEVER be touched — only package managers write these
+    _LOCK_FILES: set[str] = {
+        'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml',
+        'go.sum', 'Cargo.lock', 'Gemfile.lock',
+        'composer.lock', 'Pipfile.lock', 'poetry.lock',
+        'Pipfile',  # managed by pipenv
+    }
+
+    # Manifests that support smart merge (additive deps only)
+    _MERGEABLE_JSON: set[str] = {
+        'package.json', 'composer.json',
+    }
+    _MERGEABLE_TEXT: set[str] = {
+        'requirements.txt',
+    }
+    _MERGEABLE_TOML: set[str] = {
+        'Cargo.toml',
+    }
+    _MERGEABLE_RUBY: set[str] = {
+        'Gemfile',
+    }
+    _MERGEABLE_GO: set[str] = {
+        'go.mod',
+    }
+
+    filtered: dict[str, str] = {}
+    merged_count = 0
+    stripped_count = 0
+
+    for fpath, content in files.items():
+        basename = os.path.basename(fpath)
+
+        # Not a protected file — pass through
+        if basename not in Executor._PROTECTED_FILENAMES:
+            filtered[fpath] = content
+            continue
+
+        # File doesn't exist on disk yet — allow creation
+        if not os.path.isfile(fpath):
+            filtered[fpath] = content
+            continue
+
+        # Lock files — always block
+        if basename in _LOCK_FILES:
+            log.warning(f"[Pipeline] Blocked lock file: {fpath} "
+                        f"(only package managers should modify this)")
+            stripped_count += 1
+            continue
+
+        # Read existing file content
+        try:
+            with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+                existing_content = f.read()
+        except OSError:
+            log.warning(f"[Pipeline] Cannot read {fpath}, blocking write")
+            stripped_count += 1
+            continue
+
+        # Attempt smart merge based on file type
+        merged = None
+        if basename in _MERGEABLE_JSON:
+            merged = _smart_merge_json_manifest(existing_content, content, fpath)
+        elif basename in _MERGEABLE_TEXT:
+            merged = _smart_merge_requirements_txt(existing_content, content, fpath)
+        elif basename in _MERGEABLE_GO:
+            merged = _smart_merge_go_mod(existing_content, content, fpath)
+        elif basename in _MERGEABLE_TOML:
+            merged = _smart_merge_line_based(existing_content, content, fpath)
+        elif basename in _MERGEABLE_RUBY:
+            merged = _smart_merge_line_based(existing_content, content, fpath)
+
+        if merged is not None and merged != existing_content:
+            filtered[fpath] = merged
+            merged_count += 1
+            log.info(f"[Pipeline] Smart-merged additive changes into {fpath}")
+        elif merged == existing_content:
+            log.info(f"[Pipeline] No new additions for {fpath}, skipping write")
+            stripped_count += 1
+        else:
+            log.warning(f"[Pipeline] Smart merge failed for {fpath}, "
+                        f"blocking write (fallback)")
+            stripped_count += 1
+
+    if merged_count > 0:
+        log.info(f"[Pipeline] Smart-merged {merged_count} protected file(s)")
+    if stripped_count > 0:
+        log.info(f"[Pipeline] Blocked {stripped_count} protected file(s)")
+    return filtered
+
+
+def _smart_merge_json_manifest(existing: str, llm_output: str,
+                                filepath: str) -> str | None:
+    """Merge additive changes from LLM output into an existing JSON manifest.
+
+    Merges new keys in ``dependencies``, ``devDependencies``, and ``scripts``.
+    Blocks removals and version changes.  Returns merged JSON string, or
+    ``None`` on parse failure.
+    """
+    try:
+        old_data = json.loads(existing)
+        new_data = json.loads(llm_output)
+    except (json.JSONDecodeError, TypeError):
+        log.warning(f"[SmartMerge] JSON parse failed for {filepath}")
+        return None
+
+    if not isinstance(old_data, dict) or not isinstance(new_data, dict):
+        return None
+
+    changed = False
+    # Sections where we allow additive merges
+    merge_sections = ['dependencies', 'devDependencies', 'scripts',
+                      'peerDependencies', 'optionalDependencies']
+
+    for section in merge_sections:
+        old_section = old_data.get(section, {})
+        new_section = new_data.get(section, {})
+        if not isinstance(old_section, dict) or not isinstance(new_section, dict):
+            continue
+
+        for key, value in new_section.items():
+            if key not in old_section:
+                # New key — merge it in
+                if section not in old_data:
+                    old_data[section] = {}
+                old_data[section][key] = value
+                changed = True
+                log.info(f"[SmartMerge] Added {section}.{key} = {value!r} "
+                         f"to {filepath}")
+            elif old_section[key] != value:
+                # Changed value — block, keep original
+                log.info(f"[SmartMerge] Blocked change to {section}.{key} "
+                         f"in {filepath}: {old_section[key]!r} → {value!r}")
+
+        # Check for removals — log but don't apply
+        for key in old_section:
+            if key not in new_section:
+                log.info(f"[SmartMerge] Blocked removal of {section}.{key} "
+                         f"from {filepath}")
+
+    if not changed:
+        return existing
+
+    # Preserve original formatting indent
+    indent = 2  # default
+    for line in existing.splitlines()[1:5]:
+        stripped = line.lstrip()
+        if stripped:
+            indent = len(line) - len(stripped)
+            break
+
+    return json.dumps(old_data, indent=indent, ensure_ascii=False) + "\n"
+
+
+def _smart_merge_requirements_txt(existing: str, llm_output: str,
+                                   filepath: str) -> str | None:
+    """Merge new packages from LLM output into existing requirements.txt.
+
+    Appends packages that don't exist yet.  Blocks removals and version
+    changes.  Returns merged content string.
+    """
+    import re
+
+    def _parse_req_name(line: str) -> str | None:
+        """Extract package name from a requirements.txt line."""
+        line = line.strip()
+        if not line or line.startswith('#') or line.startswith('-'):
+            return None
+        # Handle: package==1.0, package>=1.0, package~=1.0, package[extra]
+        m = re.match(r'^([A-Za-z0-9_][A-Za-z0-9._-]*)', line)
+        return m.group(1).lower() if m else None
+
+    existing_lines = existing.splitlines()
+    new_lines = llm_output.splitlines()
+
+    # Build map of existing packages: name → full line
+    existing_pkgs: dict[str, str] = {}
+    for line in existing_lines:
+        name = _parse_req_name(line)
+        if name:
+            existing_pkgs[name] = line.strip()
+
+    # Find new packages to add
+    additions: list[str] = []
+    for line in new_lines:
+        name = _parse_req_name(line)
+        if name is None:
+            continue
+        if name not in existing_pkgs:
+            additions.append(line.strip())
+            log.info(f"[SmartMerge] Adding new package: {line.strip()} "
+                     f"to {filepath}")
+        elif existing_pkgs[name] != line.strip():
+            log.info(f"[SmartMerge] Blocked version change for {name} "
+                     f"in {filepath}: {existing_pkgs[name]} → {line.strip()}")
+
+    if not additions:
+        return existing
+
+    # Append new packages at the end
+    result = existing.rstrip('\n')
+    result += '\n' + '\n'.join(additions) + '\n'
+    return result
+
+
+def _smart_merge_go_mod(existing: str, llm_output: str,
+                         filepath: str) -> str | None:
+    """Merge new require directives from LLM output into existing go.mod.
+
+    Only adds new ``require`` lines that don't exist yet.
+    """
+    import re
+
+    def _parse_requires(content: str) -> dict[str, str]:
+        """Extract module → version from require directives."""
+        reqs: dict[str, str] = {}
+        # Single-line: require module/path v1.2.3
+        for m in re.finditer(r'^\s*require\s+(\S+)\s+(\S+)', content, re.MULTILINE):
+            reqs[m.group(1)] = m.group(2)
+        # Block: require ( ... )
+        for block in re.finditer(r'require\s*\((.*?)\)', content, re.DOTALL):
+            for line in block.group(1).splitlines():
+                line = line.strip()
+                if line and not line.startswith('//'):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        reqs[parts[0]] = parts[1]
+        return reqs
+
+    existing_reqs = _parse_requires(existing)
+    new_reqs = _parse_requires(llm_output)
+
+    additions: list[str] = []
+    for mod, ver in new_reqs.items():
+        if mod not in existing_reqs:
+            additions.append(f"\trequire {mod} {ver}")
+            log.info(f"[SmartMerge] Adding require {mod} {ver} to {filepath}")
+
+    if not additions:
+        return existing
+
+    result = existing.rstrip('\n')
+    result += '\n' + '\n'.join(additions) + '\n'
+    return result
+
+
+def _smart_merge_line_based(existing: str, llm_output: str,
+                             filepath: str) -> str | None:
+    """Generic line-based merge for Cargo.toml, Gemfile, etc.
+
+    Appends lines from LLM output that don't exist (case-sensitive) in
+    the existing file.  This is a conservative catch-all for formats
+    we don't deeply parse.
+    """
+    existing_lines_set = set(existing.splitlines())
+
+    additions: list[str] = []
+    for line in llm_output.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith('#'):
+            continue
+        if line not in existing_lines_set and stripped not in {
+            l.strip() for l in existing_lines_set
+        }:
+            additions.append(line)
+
+    if not additions:
+        return existing
+
+    log.info(f"[SmartMerge] Appending {len(additions)} new line(s) to {filepath}")
+    result = existing.rstrip('\n')
+    result += '\n' + '\n'.join(additions) + '\n'
+    return result
 
 
 def _shell_instructions() -> str:
@@ -361,10 +699,16 @@ def _handle_code_step(step_text: str, coder: CoderAgent, reviewer: ReviewerAgent
 
         files = executor.parse_code_blocks(response)
         if not files:
+            files = executor.parse_code_blocks_fuzzy(response)
+        if not files:
             feedback = "No file markers found. Use #### [FILE]: path/to/file.py format."
             display.step_info(step_idx, "No files parsed, retrying...")
             log.warning(f"Step {step_idx+1}: No files parsed from coder response.")
             continue
+
+        # Strip protected manifest files (package.json, etc.) to prevent
+        # LLM from overwriting them with corrupted versions
+        files = _strip_protected_files(files)
 
         # On retry, merge: keep previously approved files that weren't
         # re-generated, so the coder doesn't need to regenerate everything
@@ -441,6 +785,7 @@ def _handle_code_step(step_text: str, coder: CoderAgent, reviewer: ReviewerAgent
                 "will fail", "won't work", "does not work", "broken",
                 "incorrect", "wrong", "typeerror", "nameerror",
                 "syntaxerror", "attributeerror", "keyerror",
+                "referenceerror",
             ))
             if not has_critical:
                 display.step_info(step_idx, "Review has only minor suggestions, accepting ✔")
@@ -592,6 +937,41 @@ def _handle_test_step(step_text: str, tester: TesterAgent, coder: CoderAgent,
             log.warning(f"Step {step_idx+1}: Failed to install "
                         f"{actual_tool}: {out[:200]}")
 
+    # Detect JS/TS project environment for ESM-aware test generation
+    js_env: dict | None = None
+    if language in ("javascript", "typescript"):
+        js_env = _read_js_project_env()
+        log.info(f"Step {step_idx+1}: JS project env: {js_env}")
+
+        # Auto-setup for ESM projects: install @jest/globals if needed
+        if js_env.get("is_esm") and not js_env.get("has_jest_globals"):
+            display.step_info(step_idx, "ESM project detected, installing @jest/globals...")
+            ok, out = executor.run_command("npm install --save-dev @jest/globals")
+            if ok:
+                js_env["has_jest_globals"] = True
+                display.step_info(step_idx, "Installed @jest/globals")
+            else:
+                log.warning(f"Step {step_idx+1}: Failed to install @jest/globals: {out[:200]}")
+
+        # Create minimal jest.config for ESM if missing
+        if js_env.get("is_esm") and not js_env.get("has_jest_config"):
+            jest_config_content = (
+                "// Auto-generated for ESM compatibility\n"
+                "export default {\n"
+                "  transform: {},\n"
+                "};\n"
+            )
+            config_path = "jest.config.js"
+            if not os.path.isfile(config_path):
+                try:
+                    with open(config_path, "w", encoding="utf-8") as f:
+                        f.write(jest_config_content)
+                    js_env["has_jest_config"] = True
+                    display.step_info(step_idx, "Created jest.config.js for ESM")
+                    log.info(f"Step {step_idx+1}: Auto-created jest.config.js for ESM")
+                except OSError as e:
+                    log.warning(f"Step {step_idx+1}: Failed to create jest.config.js: {e}")
+
     code_summary = ""
     for fname, content in memory.all_files().items():
         code_summary += f"#### [FILE]: {fname}\n```{lang_tag}\n{content}\n```\n\n"
@@ -605,11 +985,22 @@ def _handle_test_step(step_text: str, tester: TesterAgent, coder: CoderAgent,
         gen_context = f"Code:\n{code_summary}"
         if feedback:
             gen_context += f"\nFeedback: {feedback}"
+        # Add JS/TS environment info to context
+        if js_env:
+            env_note = f"\nProject environment: {js_env}"
+            if js_env.get('is_esm'):
+                env_note += (
+                    "\nCRITICAL: This is an ES Module project. "
+                    "Tests MUST import from '@jest/globals'.\n"
+                )
+            gen_context += env_note
 
         sent_before = token_tracker.total_prompt_tokens
         recv_before = token_tracker.total_completion_tokens
 
-        test_response = tester.process(step_text, context=gen_context, language=language)
+        test_response = tester.process(
+            step_text, context=gen_context, language=language,
+            env_info=js_env)
 
         sent_delta = token_tracker.total_prompt_tokens - sent_before
         recv_delta = token_tracker.total_completion_tokens - recv_before
@@ -626,6 +1017,9 @@ def _handle_test_step(step_text: str, tester: TesterAgent, coder: CoderAgent,
             feedback = "No test files found. Use #### [FILE]: format."
             display.step_info(step_idx, "No test files parsed, retrying...")
             continue
+
+        # Strip protected manifest files before they reach memory
+        test_files = _strip_protected_files(test_files)
 
         # Normalize paths: fix LLM-generated paths that are suffixes of known files
         test_files = _normalize_fix_paths(test_files, memory)
@@ -709,7 +1103,7 @@ def _handle_test_step(step_text: str, tester: TesterAgent, coder: CoderAgent,
             _error_classes = set(_re.findall(
                 r'(ModuleNotFoundError|ImportError|SyntaxError|NameError|'
                 r'TypeError|AttributeError|IndentationError|FileNotFoundError|'
-                r'AssertionError|KeyError|ValueError)',
+                r'AssertionError|KeyError|ValueError|ReferenceError)',
                 output or ""
             ))
 
@@ -718,7 +1112,7 @@ def _handle_test_step(step_text: str, tester: TesterAgent, coder: CoderAgent,
                 prev_error_classes = set(_re.findall(
                     r'(ModuleNotFoundError|ImportError|SyntaxError|NameError|'
                     r'TypeError|AttributeError|IndentationError|FileNotFoundError|'
-                    r'AssertionError|KeyError|ValueError)',
+                    r'AssertionError|KeyError|ValueError|ReferenceError)',
                     prev_output or ""
                 ))
                 if _error_classes and _error_classes == prev_error_classes:
@@ -852,6 +1246,8 @@ def _handle_test_step(step_text: str, tester: TesterAgent, coder: CoderAgent,
             if not fix_files:
                 fix_files = executor.parse_code_blocks_fuzzy(fix_response)
             if fix_files:
+                # Strip protected manifest files
+                fix_files = _strip_protected_files(fix_files)
                 # Normalize paths and filter to test-only files
                 fix_files = _normalize_fix_paths(fix_files, memory)
                 fix_files = _filter_test_only_files(

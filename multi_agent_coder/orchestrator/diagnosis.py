@@ -9,7 +9,7 @@ from ..cli_display import CLIDisplay, token_tracker, log
 from ..diff_display import show_diffs, _detect_hazards
 
 from .memory import FileMemory
-from .step_handlers import _shell_instructions
+from .step_handlers import _shell_instructions, _strip_protected_files
 from .classification import _extract_commands_from_text, _looks_like_command
 
 
@@ -121,6 +121,10 @@ def _apply_fix(diagnosis: str, executor: Executor, memory: FileMemory,
             if files:
                 log.info(f"Step {step_idx+1}: Standard parser found nothing, "
                          f"fuzzy parser extracted: {list(files.keys())}")
+
+        if files:
+            # Strip protected manifest files before any further processing
+            files = _strip_protected_files(files)
 
         if files:
             # Filter out files with hazardous diffs (e.g. truncation,

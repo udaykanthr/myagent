@@ -28,11 +28,27 @@ class FileMemory:
         self._lock = threading.Lock()
 
     def update(self, files: dict[str, str]):
-        """Store or overwrite file contents and update embeddings."""
+        """Store or overwrite file contents and update embeddings.
+
+        Protected manifest files (package.json, go.mod, etc.) are skipped
+        when they already exist on disk to prevent LLM-generated corruption.
+        """
+        import os
+        from ..executor import Executor
+
         with self._lock:
-            self._files.update(files)
-            if self._store:
-                for fpath, content in files.items():
+            for fpath, content in files.items():
+                # Guard: don't store LLM-generated protected files if they
+                # already exist on disk (the LLM's version is almost always
+                # a stripped-down, corrupted subset)
+                basename = os.path.basename(fpath)
+                if basename in Executor._PROTECTED_FILENAMES and os.path.isfile(fpath):
+                    log.warning(f"[FileMemory] Skipping protected file update: "
+                                f"{fpath} (already exists on disk)")
+                    continue
+
+                self._files[fpath] = content
+                if self._store:
                     self._store.add(fpath, content)
 
     def get(self, filepath: str) -> str | None:

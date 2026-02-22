@@ -17,13 +17,29 @@ HAZARD_WARN = "WARN"
 
 
 def compute_diff(filepath: str, new_content: str, base_dir: str = ".") -> str | None:
-    """Return unified diff string if file exists and content differs.
+    """Return unified diff string for modified or new files.
 
-    Returns None if the file doesn't exist (new file) or content is unchanged.
+    For existing files: returns a unified diff if content differs.
+    For new files: returns a diff showing all lines as additions.
+    Returns None only if the file exists and content is unchanged.
     """
+    # Repair mojibake in new content before diffing so the diff viewer
+    # doesn't show false special-character changes
+    from .executor import Executor
+    new_content = Executor._repair_mojibake(new_content)
+
     full_path = os.path.join(base_dir, filepath)
     if not os.path.isfile(full_path):
-        return None  # new file, no diff
+        # New file — show entire content as additions
+        new_lines = new_content.splitlines(keepends=True)
+        diff = difflib.unified_diff(
+            [], new_lines,
+            fromfile="/dev/null",
+            tofile=f"b/{filepath}",
+            lineterm="",
+        )
+        diff_text = "\n".join(diff)
+        return diff_text if diff_text.strip() else None
 
     try:
         with open(full_path, "r", encoding="utf-8", errors="replace") as f:
@@ -69,7 +85,7 @@ def format_colored_diff(diff_text: str) -> str:
 
 
 def compute_diffs(files: dict[str, str], base_dir: str = ".") -> list[tuple[str, str]]:
-    """Compute diffs for all files. Returns list of (filepath, diff_text)."""
+    """Compute diffs for all files (modified and new). Returns list of (filepath, diff_text)."""
     diffs: list[tuple[str, str]] = []
     for filepath, content in files.items():
         diff = compute_diff(filepath, content, base_dir)

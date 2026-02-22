@@ -15,8 +15,22 @@ from .classification import _extract_commands_from_text, _looks_like_command
 
 def _diagnose_failure(step_text: str, step_type: str, error_info: str,
                       memory: FileMemory, llm_client, display: CLIDisplay,
-                      step_idx: int) -> str:
+                      step_idx: int,
+                      search_agent=None,
+                      language: str | None = None) -> str:
     display.step_info(step_idx, "Analyzing failure root cause...")
+
+    # ── Optional: search the web for error documentation ────
+    search_context = ""
+    if search_agent is not None:
+        display.step_info(step_idx, "Searching web for error documentation...")
+        try:
+            search_context = search_agent.search_for_error(
+                error_info, step_text, language=language)
+            if search_context:
+                log.info(f"Step {step_idx+1}: Search agent found documentation")
+        except Exception as exc:
+            log.warning(f"Step {step_idx+1}: Search agent error: {exc}")
 
     context_files = memory.related_context(step_text)
 
@@ -36,6 +50,12 @@ def _diagnose_failure(step_text: str, step_type: str, error_info: str,
         f"Step type: {step_type}\n\n"
         f"Error details:\n{error_info}\n\n"
     )
+    if search_context:
+        prompt += (
+            "The following web search results may contain relevant documentation,\n"
+            "error explanations, or solutions. Use them to inform your fix:\n\n"
+            f"{search_context}\n\n"
+        )
     if prior_context:
         prompt += f"{prior_context}\n"
     if context_files:

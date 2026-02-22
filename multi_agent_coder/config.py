@@ -37,6 +37,12 @@ _DEFAULTS = {
     "plugins": [],
     "planner_suffix": "Do not create meta-steps (e.g., 'Review code', 'Identify issues'). Focus on implementation. Combine analysis and action.",
     "budget_limit": 0.0,
+    "search_enabled": True,
+    "search_provider": "duckduckgo",
+    "search_api_key": "",
+    "search_api_url": "",
+    "search_max_results": 3,
+    "search_max_page_chars": 3000,
     "pricing": {
         "gpt-4o": {"input": 2.50, "output": 10.00},
         "gpt-4o-mini": {"input": 0.15, "output": 0.60},
@@ -213,6 +219,24 @@ class Config:
         if not isinstance(self.PRICING, dict):
             self.PRICING = _DEFAULTS["pricing"]
 
+        # Search agent
+        self.SEARCH_ENABLED = _get_bool("SEARCH_ENABLED", "search_enabled",
+                                         _DEFAULTS["search_enabled"])
+        self.SEARCH_PROVIDER = _get("SEARCH_PROVIDER", "search_provider",
+                                     _DEFAULTS["search_provider"])
+        self.SEARCH_API_KEY = _get("SEARCH_API_KEY", "search_api_key",
+                                    _DEFAULTS["search_api_key"])
+        self.SEARCH_API_URL = _get("SEARCH_API_URL", "search_api_url",
+                                    _DEFAULTS["search_api_url"])
+        self.SEARCH_MAX_RESULTS = _get("SEARCH_MAX_RESULTS",
+                                        "search_max_results",
+                                        _DEFAULTS["search_max_results"],
+                                        cast=int)
+        self.SEARCH_MAX_PAGE_CHARS = _get("SEARCH_MAX_PAGE_CHARS",
+                                           "search_max_page_chars",
+                                           _DEFAULTS["search_max_page_chars"],
+                                           cast=int)
+
         # Plugins
         self.PLUGINS: list[str] = yd.get("plugins", _DEFAULTS["plugins"])
         if not isinstance(self.PLUGINS, list):
@@ -253,6 +277,12 @@ class Config:
             "plugins": self.PLUGINS,
             "budget_limit": self.BUDGET_LIMIT,
             "pricing": self.PRICING,
+            "search_enabled": self.SEARCH_ENABLED,
+            "search_provider": self.SEARCH_PROVIDER,
+            "search_api_key": self.SEARCH_API_KEY,
+            "search_api_url": self.SEARCH_API_URL,
+            "search_max_results": self.SEARCH_MAX_RESULTS,
+            "search_max_page_chars": self.SEARCH_MAX_PAGE_CHARS,
         }
 
     def to_yaml(self) -> str:

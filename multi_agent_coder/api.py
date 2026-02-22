@@ -184,6 +184,18 @@ def _run_task_impl(
     display = CLIDisplay(task)
     memory = FileMemory(embedding_store=embed_store, top_k=cfg.EMBEDDING_TOP_K)
 
+    # Search agent
+    search_agent = None
+    if cfg.SEARCH_ENABLED:
+        from .agents.search import SearchAgent
+        search_agent = SearchAgent(
+            provider=cfg.SEARCH_PROVIDER,
+            api_key=cfg.SEARCH_API_KEY,
+            api_url=cfg.SEARCH_API_URL,
+            max_results=cfg.SEARCH_MAX_RESULTS,
+            max_page_chars=cfg.SEARCH_MAX_PAGE_CHARS,
+        )
+
     # Pre-load existing source files into memory
     if source_files:
         memory.update(source_files)
@@ -225,7 +237,8 @@ def _run_task_impl(
                     llm_client=llm_client, executor=executor,
                     coder=coder, reviewer=reviewer, tester=tester,
                     task=task, memory=memory, display=display,
-                    language=language, auto=auto,
+                    language=language,
+                    search_agent=search_agent,
                 )
                 if fixed:
                     step_results[idx] = "done"

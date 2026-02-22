@@ -74,6 +74,8 @@ def main():
                          help="Disable HTML report generation")
     parser.add_argument("--generate-config", "--generate-yaml", action="store_true",
                          help="Generate a .agentchanti.yaml file with current settings and exit")
+    parser.add_argument("--no-search", action="store_true",
+                         help="Disable web search agent for error diagnosis")
     args = parser.parse_args()
 
     # ── 0. Load config ──
@@ -220,6 +222,21 @@ def main():
     if cfg.PLUGINS:
         plugin_registry.discover(cfg.PLUGINS)
         log.info(f"Plugins loaded: {plugin_registry.size}")
+
+    # ── 4f. Init search agent ──
+    search_agent = None
+    if cfg.SEARCH_ENABLED and not args.no_search:
+        from ..agents.search import SearchAgent
+        search_agent = SearchAgent(
+            provider=cfg.SEARCH_PROVIDER,
+            api_key=cfg.SEARCH_API_KEY,
+            api_url=cfg.SEARCH_API_URL,
+            max_results=cfg.SEARCH_MAX_RESULTS,
+            max_page_chars=cfg.SEARCH_MAX_PAGE_CHARS,
+        )
+        log.info(f"Search agent enabled (provider: {cfg.SEARCH_PROVIDER})")
+    else:
+        log.info("Search agent disabled")
 
     # ── 4e. Step reports (for HTML report) ──
     step_reports: list[StepReport] = []
@@ -471,6 +488,7 @@ def main():
                     coder=coder, reviewer=reviewer, tester=tester,
                     task=args.task, memory=memory, display=display,
                     language=language, cfg=cfg, auto=args.auto,
+                    search_agent=search_agent,
                 )
                 if fixed:
                     step_results[idx] = "done"
@@ -531,6 +549,7 @@ def main():
                     coder=coder, reviewer=reviewer, tester=tester,
                     task=args.task, memory=memory, display=display,
                     language=language, cfg=cfg, auto=args.auto,
+                    search_agent=search_agent,
                 )
                 if fixed:
                     step_results[idx] = "done"

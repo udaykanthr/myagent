@@ -205,7 +205,8 @@ def _run_diagnosis_loop(step_idx: int, step_text: str, error_info: str, *,
                         llm_client, executor, coder, reviewer, tester,
                         task: str, memory: FileMemory, display: CLIDisplay,
                         language: str | None, cfg=None,
-                        auto: bool = False) -> bool:
+                        auto: bool = False,
+                        search_agent=None) -> bool:
     """Run diagnose → fix → retry loop. Returns ``True`` if the step was fixed.
 
     All exceptions are caught so that a crash during diagnosis (e.g. an
@@ -251,7 +252,8 @@ def _run_diagnosis_loop(step_idx: int, step_text: str, error_info: str, *,
             step_type = display.steps[step_idx].get("type", "CODE")
             diagnosis = _diagnose_failure(
                 step_text, step_type, error_info,
-                memory, llm_client, display, step_idx)
+                memory, llm_client, display, step_idx,
+                search_agent=search_agent, language=language)
 
             fix_applied, cmds_succeeded = _apply_fix(
                 diagnosis, executor, memory, display, step_idx,

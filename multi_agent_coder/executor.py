@@ -501,7 +501,8 @@ class Executor:
         return any(re.search(p, cmd) for p in patterns)
 
     def run_command(self, cmd: str, env: dict | None = None,
-                    timeout: int = 120, background: bool = False) -> Tuple[bool, str]:
+                    timeout: int = 120, background: bool = False,
+                    cwd: str | None = None) -> Tuple[bool, str]:
         """
         Runs an arbitrary shell command. Returns (success, output).
         On Windows, auto-wraps PowerShell cmdlets so they don't fail
@@ -509,9 +510,13 @@ class Executor:
 
         If *background* is True, the process is started and tracked. The 
         method waits briefly (3s) to see if it crashes; if not, it returns success.
+
+        If *cwd* is set, the command runs in that directory instead of the
+        current working directory.
         """
         try:
-            log.info(f"[Executor] Running {'background ' if background else ''}command: {cmd}")
+            log.info(f"[Executor] Running {'background ' if background else ''}command: {cmd}"
+                     f"{f' (cwd={cwd})' if cwd else ''}")
             if os.name == 'nt' and Executor._needs_powershell(cmd):
                 # Escape double quotes inside the command for PowerShell
                 escaped = cmd.replace('"', '\\"')
@@ -539,6 +544,7 @@ class Executor:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 env=run_env,
+                cwd=cwd,
             )
 
             if background:
@@ -625,7 +631,7 @@ class Executor:
         except (UnicodeDecodeError, ValueError, LookupError):
             return raw.decode("ascii", errors="replace")
 
-    def run_tests(self, test_command: str = "pytest") -> Tuple[bool, str]:
+    def run_tests(self, test_command: str = "pytest", cwd: str | None = None) -> Tuple[bool, str]:
         """Run tests with the project root on PYTHONPATH.
 
         This ensures imports like ``from src.my_module import X`` resolve
@@ -635,9 +641,10 @@ class Executor:
         message instead of a silent failure.
         """
         env = os.environ.copy()
-        cwd = os.getcwd()
+        # Ensure PYTHONPATH always includes the base dir, even if running in a subdir
+        base_dir = os.getcwd()
         existing = env.get("PYTHONPATH", "")
-        env["PYTHONPATH"] = cwd + (os.pathsep + existing if existing else "")
+        env["PYTHONPATH"] = base_dir + (os.pathsep + existing if existing else "")
 
         # Quick check: does the test runner binary exist?
         runner = test_command.split()[0]  # e.g. "pytest", "npx", "go"
@@ -655,7 +662,7 @@ class Executor:
             log.warning(f"[Executor] {msg}")
             return False, msg
 
-        return self.run_command(test_command, env=env)
+        return self.run_command(test_command, env=env, cwd=cwd)
 
     # ── Missing-package auto-install ──
 
@@ -749,13 +756,13 @@ class Executor:
 
         return packages
 
-    def install_packages(self, packages: List[str]) -> Tuple[bool, str]:
-        """Install packages via pip. Returns (all_succeeded, combined_output)."""
+    def install_packages(self, packages: List[str], tool: str = "pip install", cwd: str | None = None) -> Tuple[bool, str]:
+        """Install packages via the specified tool (default: `pip install`). Returns (all_succeeded, combined_output)."""
         if not packages:
             return True, ""
-        cmd = f"pip install {' '.join(packages)}"
+        cmd = f"{tool} {' '.join(packages)}"
         log.info(f"[Executor] Auto-installing: {cmd}")
-        return self.run_command(cmd)
+        return self.run_command(cmd, cwd=cwd)
 
     @staticmethod
     def parse_step_dependencies(steps: List[str]) -> Tuple[List[str], Dict[int, set]]:

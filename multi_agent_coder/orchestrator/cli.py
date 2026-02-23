@@ -75,7 +75,7 @@ def main():
     parser.add_argument("--generate-config", "--generate-yaml", action="store_true",
                          help="Generate a .agentchanti.yaml file with current settings and exit")
     parser.add_argument("--no-search", action="store_true",
-                         help="Disable web search agent for error diagnosis")
+                         help="Disable web search agent for planning and error diagnosis")
     args = parser.parse_args()
 
     # ── 0. Load config ──
@@ -371,6 +371,17 @@ def main():
         plan = None
         raw_steps = None
 
+        # Search for latest documentation to enrich planner context
+        if search_agent:
+            display.show_status("Searching web for latest documentation...")
+            search_context = search_agent.search_for_task(
+                args.task, language=language)
+            if search_context:
+                planner_context += f"\n\n{search_context}"
+                log.info("[Planning] Injected web search context into planner")
+            else:
+                log.info("[Planning] No web search context found")
+
         for plan_attempt in range(1, MAX_PLAN_RETRIES + 1):
             display.show_status(
                 f"Requesting steps from planner...{f' (retry {plan_attempt})' if plan_attempt > 1 else ''}"
@@ -468,6 +479,7 @@ def main():
                 coder=coder, reviewer=reviewer, tester=tester,
                 task=args.task, memory=memory, display=display,
                 language=language, cfg=cfg, auto=args.auto,
+                search_agent=search_agent,
             )
 
             if success:
@@ -517,6 +529,7 @@ def main():
                         coder=coder, reviewer=reviewer, tester=tester,
                         task=args.task, memory=memory, display=display,
                         language=language, cfg=cfg, auto=args.auto,
+                        search_agent=search_agent,
                     )
                     futures[f] = idx
 

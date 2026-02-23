@@ -1,14 +1,16 @@
 """
 Search provider — web search abstraction supporting multiple backends.
 
-Supports DuckDuckGo (free, no key), Google Custom Search, and SerpAPI.
+Supports DuckDuckGo (free, no key), Google Custom Search, SerpAPI,
+and Perplexity Search.
 """
 
+import json
 import re
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import Optional
-from urllib.parse import quote_plus, urlencode
+from urllib.parse import quote_plus, urlencode, urlparse
 
 import requests
 
@@ -229,6 +231,46 @@ def _search_serpapi(query: str, api_key: str, api_url: str = "",
     return results
 
 
+# ── Perplexity Search provider ────────────────────────────────
+
+
+def _search_perplexity(query: str, api_key: str, api_url: str = "",
+                       max_results: int = 3) -> list[SearchResult]:
+    """Search using the Perplexity API.
+
+    *api_key* is the Perplexity API key.
+    """
+    base = api_url or "https://api.perplexity.ai/search"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "query": query,
+        "max_results": max_results,
+        "max_tokens_per_page": 4096,
+    }
+
+    try:
+        resp = requests.post(base, headers=headers,
+                             json=payload, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        log.warning(f"[Search] Perplexity API request failed: {exc}")
+        return []
+
+    results: list[SearchResult] = []
+    for item in data.get("results", [])[:max_results]:
+        results.append(SearchResult(
+            title=item.get("title", ""),
+            url=item.get("url", ""),
+            snippet=item.get("snippet", ""),
+        ))
+
+    return results
+
+
 # ── Public API ───────────────────────────────────────────────
 
 
@@ -239,7 +281,7 @@ def web_search(query: str, provider: str = "duckduckgo",
 
     Args:
         query: Search query string.
-        provider: One of ``"duckduckgo"``, ``"google"``, ``"serpapi"``.
+        provider: One of ``"duckduckgo"``, ``"google"``, ``"serpapi"``, ``"perplexity"``.
         api_key: API key (required for google/serpapi).
         api_url: Optional base URL override.
         max_results: Maximum number of results to return.
@@ -260,6 +302,12 @@ def web_search(query: str, provider: str = "duckduckgo",
             log.warning("[Search] SerpAPI provider requires search_api_key")
             return []
         return _search_serpapi(query, api_key, api_url, max_results)
+
+    elif provider == "perplexity":
+        if not api_key:
+            log.warning("[Search] Perplexity provider requires search_api_key")
+            return []
+        return _search_perplexity(query, api_key, api_url, max_results)
 
     else:
         # Default: DuckDuckGo (free, no key needed)

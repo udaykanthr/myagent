@@ -146,7 +146,8 @@ def _execute_step(step_idx: int, step_text: str, *,
                   llm_client, executor, coder, reviewer, tester,
                   task: str, memory: FileMemory, display: CLIDisplay,
                   language: str | None, cfg=None,
-                  auto: bool = False) -> tuple[int, bool, str]:
+                  auto: bool = False,
+                  search_agent=None) -> tuple[int, bool, str]:
     """Execute a single step. Returns ``(step_idx, success, error_info)``.
 
     Catches all exceptions so that a crash inside any handler never
@@ -185,7 +186,7 @@ def _execute_step(step_idx: int, step_text: str, *,
             success, error_info = _handle_test_step(
                 step_text, tester, coder, reviewer, executor,
                 task, memory, display, step_idx, language=language,
-                auto=auto)
+                auto=auto, search_agent=search_agent)
             display.complete_step(step_idx, "done" if success else "failed")
 
         else:
@@ -282,6 +283,7 @@ def _run_diagnosis_loop(step_idx: int, step_text: str, error_info: str, *,
                 coder=coder, reviewer=reviewer, tester=tester,
                 task=task, memory=memory, display=display,
                 language=language, cfg=cfg, auto=auto,
+                search_agent=search_agent,
             )
 
             if success:

@@ -98,6 +98,27 @@ class TestBuildSearchQuery:
         assert "\x1b" not in query
         assert "Error" in query
 
+    def test_jest_cannot_find_module_query(self):
+        """Jest 'Cannot find module' should produce a query with the module name."""
+        error = (
+            "FAIL src/App.test.tsx\n"
+            "  ● Test suite failed to run\n"
+            "\n"
+            "    Cannot find module '@testing-library/react' from 'src/App.test.tsx'\n"
+        )
+        query = self.agent._build_search_query(error, language="javascript")
+        assert "@testing-library/react" in query
+        assert "Cannot find module" in query
+        assert "javascript" in query or "node.js" in query
+        # Should NOT have bare "FAIL" as the main content
+        assert not query.startswith("FAIL")
+
+    def test_tsx_path_stripped(self):
+        """TSX/JSX file paths should be stripped from queries."""
+        error = "Cannot find module './App' from 'src/App.test.tsx'"
+        query = self.agent._build_search_query(error, language="javascript")
+        assert "src/App.test.tsx" not in query
+
 
 # ── SearchAgent key error line extraction ────────────────────
 
@@ -127,15 +148,70 @@ class TestExtractKeyErrorLine:
         assert "TypeError" in line
 
     def test_generic_error(self):
-        """Should extract lines containing 'error' (case-insensitive)."""
+        """Should extract lines containing 'error' or 'failed' (case-insensitive)."""
         error = "Command failed: npm install\nerror code ERESOLVE\nsome other line"
         line = SearchAgent._extract_key_error_line(error)
-        assert "error" in line.lower()
+        assert "error" in line.lower() or "failed" in line.lower()
 
     def test_empty_input(self):
         """Empty input should return empty string."""
         assert SearchAgent._extract_key_error_line("") == ""
         assert SearchAgent._extract_key_error_line("   \n  \n") == ""
+
+    def test_jest_cannot_find_module(self):
+        """Should extract 'Cannot find module' from Jest output, not the FAIL marker."""
+        error = (
+            "FAIL src/App.test.tsx\n"
+            "  ● Test suite failed to run\n"
+            "\n"
+            "    Cannot find module '@testing-library/react' from 'src/App.test.tsx'\n"
+        )
+        line = SearchAgent._extract_key_error_line(error)
+        assert "Cannot find module" in line
+        assert "@testing-library/react" in line
+        # Should NOT pick the bare FAIL marker
+        assert not line.startswith("FAIL")
+
+    def test_jest_module_not_found(self):
+        """Should extract 'Module not found' errors."""
+        error = (
+            "FAIL src/index.test.js\n"
+            "  ● Test suite failed to run\n"
+            "\n"
+            "    Module not found: Can't resolve 'axios' in '/app/src'\n"
+        )
+        line = SearchAgent._extract_key_error_line(error)
+        assert "Module not found" in line
+
+    def test_unexpected_token(self):
+        """Should extract 'Unexpected token' errors."""
+        error = (
+            "FAIL src/App.test.tsx\n"
+            "  ● Test suite failed to run\n"
+            "\n"
+            "    SyntaxError: Unexpected token '<'\n"
+        )
+        # SyntaxError: should match the Python/Node pattern first
+        line = SearchAgent._extract_key_error_line(error)
+        assert "SyntaxError" in line or "Unexpected token" in line
+
+    def test_is_not_defined(self):
+        """Should extract 'is not defined' errors."""
+        error = (
+            "FAIL tests/utils.test.js\n"
+            "  ● sum › adds 1 + 2 to equal 3\n"
+            "\n"
+            "    ReferenceError: sum is not defined\n"
+        )
+        line = SearchAgent._extract_key_error_line(error)
+        assert "is not defined" in line or "ReferenceError" in line
+
+    def test_skips_bare_fail_marker(self):
+        """Fallback should skip bare 'FAIL path' lines."""
+        error = "FAIL src/App.test.tsx\nsome other info here"
+        line = SearchAgent._extract_key_error_line(error)
+        # Should pick the second line, not the FAIL marker
+        assert line == "some other info here"
 
 
 # ── SearchAgent result formatting ────────────────────────────
@@ -464,3 +540,88 @@ class TestDiagnosisWithSearch:
 
         # Should still return diagnosis, no crash
         assert result == "ROOT CAUSE: test\nFIX: none"
+
+
+# ── SearchAgent.search_for_task tests ────────────────────────
+
+
+class TestSearchForTask:
+    """Tests for search_for_task() — planning-phase search."""
+
+    @patch("multi_agent_coder.agents.search.web_search")
+    @patch("multi_agent_coder.agents.search.fetch_page_text", return_value="")
+    def test_returns_context(self, mock_fetch, mock_search):
+        """Should return formatted context for a valid task."""
+        mock_search.return_value = [
+            SearchResult("Flask Quickstart", "https://flask.palletsprojects.com",
+                         "How to install and run Flask"),
+        ]
+        agent = SearchAgent()
+        result = agent.search_for_task("Create a Flask REST API", language="python")
+        assert "Flask Quickstart" in result
+        assert "Web Search Context" in result
+        assert "latest documentation" in result
+        mock_search.assert_called_once()
+
+    @patch("multi_agent_coder.agents.search.web_search")
+    def test_returns_empty_on_no_results(self, mock_search):
+        """Should return empty string when no results found."""
+        mock_search.return_value = []
+        agent = SearchAgent()
+        result = agent.search_for_task("Build a web app")
+        assert result == ""
+
+    @patch("multi_agent_coder.agents.search.web_search",
+           side_effect=Exception("Network error"))
+    def test_graceful_failure(self, mock_search):
+        """Should return empty string on exception, never raise."""
+        agent = SearchAgent()
+        result = agent.search_for_task("Create a project")
+        assert result == ""
+
+    def test_empty_task_skips_search(self):
+        """Empty task should return empty without searching."""
+        agent = SearchAgent()
+        assert agent.search_for_task("") == ""
+        assert agent.search_for_task("   ") == ""
+
+
+# ── SearchAgent._build_task_query tests ──────────────────────
+
+
+class TestBuildTaskQuery:
+    """Tests for SearchAgent._build_task_query()."""
+
+    def setup_method(self):
+        self.agent = SearchAgent()
+
+    def test_basic_query(self):
+        """Should include the task text and documentation focus."""
+        query = self.agent._build_task_query("Create a Flask REST API")
+        assert "Flask" in query
+        assert "REST" in query
+        assert "docs" in query or "guide" in query
+
+    def test_with_language(self):
+        """Should include language keyword."""
+        query = self.agent._build_task_query("Build a web server", language="python")
+        assert "python" in query
+
+    def test_empty_task(self):
+        """Empty task should return empty query."""
+        assert self.agent._build_task_query("") == ""
+        assert self.agent._build_task_query("   ") == ""
+
+    def test_query_length_cap(self):
+        """Very long tasks should be capped at 150 chars."""
+        task = "Create " + "a very complex " * 20 + "application"
+        query = self.agent._build_task_query(task)
+        assert len(query) <= 150
+
+    def test_ansi_codes_stripped(self):
+        """ANSI escape codes should be stripped."""
+        task = "\x1b[31mBuild a Node.js API\x1b[0m"
+        query = self.agent._build_task_query(task)
+        assert "\x1b" not in query
+        assert "Node.js" in query
+

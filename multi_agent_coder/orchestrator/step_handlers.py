@@ -47,12 +47,12 @@ def _get_runner_install_cmd(runner: str) -> str | None:
     return _RUNNER_INSTALL.get(runner, f"pip install {runner}")
 
 
-def _read_js_project_env() -> dict:
+def _read_js_project_env(cwd: str | None = None) -> dict:
     """Read package.json and project config to detect JS/TS environment.
 
     Returns a dict with:
         is_esm: bool       — True if package.json has "type": "module"
-        has_jest: bool      — True if jest is in dependencies/devDependencies
+        has_jest: bool      — True if jest in dependencies/devDependencies
         has_jest_globals: bool — True if @jest/globals is installed
         has_jest_config: bool — True if jest.config.* exists
         module_type: str    — "module" or "commonjs"
@@ -66,7 +66,7 @@ def _read_js_project_env() -> dict:
     }
 
     # Read package.json
-    pkg_path = "package.json"
+    pkg_path = os.path.join(cwd, "package.json") if cwd else "package.json"
     if os.path.isfile(pkg_path):
         try:
             with open(pkg_path, "r", encoding="utf-8") as f:
@@ -89,7 +89,8 @@ def _read_js_project_env() -> dict:
     # Jest config detection
     for config_name in ("jest.config.js", "jest.config.ts", "jest.config.mjs",
                         "jest.config.cjs", "jest.config.json"):
-        if os.path.isfile(config_name):
+        cfg_path = os.path.join(cwd, config_name) if cwd else config_name
+        if os.path.isfile(cfg_path):
             env["has_jest_config"] = True
             break
 
@@ -469,6 +470,96 @@ def _build_prior_steps_context(memory: FileMemory, step_idx: int) -> str:
     return "Previously executed steps:\n" + "\n\n".join(parts) + "\n\n"
 
 
+def _detect_subproject_root(memory: FileMemory) -> str | None:
+    """Detect if all project files share a common subdirectory prefix.
+
+    When an earlier CMD step created a project in a subdirectory (e.g.
+    ``npx create-react-app my-app``), subsequent files in memory will all
+    live under ``my-app/``.  This function finds that common root.
+
+    Returns the subdirectory name (e.g. ``my-app``) or ``None``.
+    """
+    all_files = memory.all_files()
+    # Only consider real source files, not internal tracking paths.
+    # Internal paths use underscore-prefixed directories (_cmd_output/,
+    # _fix_output/, etc.) and must be excluded from sub-project detection.
+    source_paths = [
+        p for p in all_files
+        if not p.startswith('_') and '/' in p
+    ]
+    if not source_paths:
+        return None
+
+    # Extract first path component from each file
+    first_components: set[str] = set()
+    for p in source_paths:
+        parts = p.replace('\\', '/').split('/')
+        if len(parts) >= 2:  # must have at least dir/file
+            first_components.add(parts[0])
+
+    # If all files share the same single first directory component,
+    # that's our sub-project root
+    if len(first_components) == 1:
+        subproject = first_components.pop()
+        # Sanity check: the directory should exist on disk
+        if os.path.isdir(subproject):
+            log.info(f"[SubProject] Detected sub-project root: {subproject}/")
+            return subproject
+
+    # Fallback 1: if memory contains files from multiple top-level directories
+    # (e.g. search provider added files), look for a known project manifest
+    from ..executor import Executor
+    manifest_dirs = set()
+    for p in source_paths:
+        if os.path.basename(p) in Executor._PROTECTED_FILENAMES:
+            dirname = os.path.dirname(p)
+            if dirname:  # Must be a subdirectory
+                manifest_dirs.add(dirname)
+
+    if len(manifest_dirs) == 1:
+        subproject = manifest_dirs.pop()
+        if os.path.isdir(subproject):
+            log.info(f"[SubProject] Detected sub-project root via manifest in memory: {subproject}/")
+            return subproject
+
+    # Fallback 2: scan immediate subdirectories on disk for project manifests.
+    # Protected files (package.json, etc.) are often NOT in memory because
+    # _strip_protected_files blocks them.  Check the filesystem directly.
+    # Only consider directories that memory files reference.
+    candidate_dirs = first_components if first_components else set()
+    for candidate in candidate_dirs:
+        if not os.path.isdir(candidate):
+            continue
+        for manifest in ('package.json', 'requirements.txt', 'go.mod',
+                         'Cargo.toml', 'Gemfile', 'pyproject.toml',
+                         'composer.json'):
+            if os.path.isfile(os.path.join(candidate, manifest)):
+                log.info(f"[SubProject] Detected sub-project root via "
+                         f"disk manifest ({manifest}): {candidate}/")
+                return candidate
+
+    # Fallback 3: if memory has files under a common prefix but the primary
+    # check failed (e.g. multiple first-components), pick the directory that
+    # contains the majority of files.
+    if len(first_components) > 1:
+        from collections import Counter
+        counts = Counter(
+            p.replace('\\', '/').split('/')[0]
+            for p in source_paths
+            if len(p.replace('\\', '/').split('/')) >= 2
+        )
+        if counts:
+            best, best_count = counts.most_common(1)[0]
+            total = sum(counts.values())
+            # Only use majority if it covers >70% of files
+            if best_count > total * 0.7 and os.path.isdir(best):
+                log.info(f"[SubProject] Detected sub-project root via "
+                         f"majority ({best_count}/{total} files): {best}/")
+                return best
+
+    return None
+
+
 def _handle_cmd_step(step_text: str, executor: Executor,
                      llm_client, memory: FileMemory,
                      display: CLIDisplay, step_idx: int,
@@ -520,6 +611,32 @@ def _handle_cmd_step(step_text: str, executor: Executor,
             log.warning(f"Step {step_idx+1}: LLM returned empty command.")
             return True, ""
 
+    # Detect sub-project root so commands like `npm install` run in the
+    # correct directory instead of the repo root.
+    subproject_cwd = None
+    subproject = _detect_subproject_root(memory)
+    if subproject:
+        import re as _re_sp
+        # Commands that should run inside the sub-project directory
+        _subproject_cmd_patterns = (
+            r'\bnpm\s+(install|start|run|test|build|ci)\b',
+            r'\bnpx\s+',
+            r'\byarn\s+(install|add|start|dev|build|test)\b',
+            r'\bpnpm\s+(install|add|start|dev|build|test)\b',
+            r'\bnode\s+',
+            r'\bng\s+(serve|build|test)\b',
+        )
+        needs_subproject = any(
+            _re_sp.search(p, cmd, _re_sp.IGNORECASE)
+            for p in _subproject_cmd_patterns
+        )
+        # Don't set cwd if the command already includes a `cd` to the subproject
+        already_has_cd = f'cd {subproject}' in cmd or f'cd ./{subproject}' in cmd
+        if needs_subproject and not already_has_cd:
+            subproject_cwd = subproject
+            log.info(f"Step {step_idx+1}: Running command in sub-project: "
+                     f"{subproject}/")
+
     # Detect if this should be a background command (e.g. starting a server).
     # Must be specific — broad keywords like "npm" or "run" cause false
     # positives that make install/build commands return before completing.
@@ -541,14 +658,16 @@ def _handle_cmd_step(step_text: str, executor: Executor,
     )
     is_background = any(_re.search(p, cmd, _re.IGNORECASE) for p in _bg_cmd_patterns)
     
+    cwd_note = f" (in {subproject_cwd}/)" if subproject_cwd else ""
     if is_background:
-        display.step_info(step_idx, f"Running background: {cmd}")
+        display.step_info(step_idx, f"Running background: {cmd}{cwd_note}")
         log.info(f"Step {step_idx+1}: Running background command: {cmd}")
     else:
-        display.step_info(step_idx, f"Running: {cmd}")
+        display.step_info(step_idx, f"Running: {cmd}{cwd_note}")
         log.info(f"Step {step_idx+1}: Running command: {cmd}")
 
-    success, output = executor.run_command(cmd, background=is_background)
+    success, output = executor.run_command(
+        cmd, background=is_background, cwd=subproject_cwd)
     log.info(f"Step {step_idx+1}: Command output:\n{output}")
 
     if output:
@@ -705,6 +824,10 @@ def _handle_code_step(step_text: str, coder: CoderAgent, reviewer: ReviewerAgent
             display.step_info(step_idx, "No files parsed, retrying...")
             log.warning(f"Step {step_idx+1}: No files parsed from coder response.")
             continue
+
+        # Normalize paths: fix LLM-generated paths that are suffixes of
+        # known project files (e.g. src/App.js → my-app/src/App.js)
+        files = _normalize_fix_paths(files, memory)
 
         # Strip protected manifest files (package.json, etc.) to prevent
         # LLM from overwriting them with corrupted versions
@@ -910,9 +1033,13 @@ def _handle_test_step(step_text: str, tester: TesterAgent, coder: CoderAgent,
                       task: str, memory: FileMemory,
                       display: CLIDisplay, step_idx: int,
                       language: str | None = None,
-                      auto: bool = False) -> tuple[bool, str]:
+                      auto: bool = False,
+                      search_agent=None) -> tuple[bool, str]:
     lang_tag = get_code_block_lang(language) if language else "python"
     test_cmd = get_test_framework(language)["command"] if language else "pytest"
+
+    # Detect sub-project (if the test targets a nested folder)
+    subproject_cwd = _detect_subproject_root(memory)
 
     # Ensure the test runner binary is installed before attempting to run tests
     parts = test_cmd.split()
@@ -930,7 +1057,7 @@ def _handle_test_step(step_text: str, tester: TesterAgent, coder: CoderAgent,
             return False, msg
         display.step_info(step_idx, f"`{runner}` not found, installing...")
         log.info(f"Step {step_idx+1}: Auto-installing: {install_cmd}")
-        ok, out = executor.run_command(install_cmd)
+        ok, out = executor.run_command(install_cmd, cwd=subproject_cwd)
         if ok:
             display.step_info(step_idx, f"Installed `{actual_tool}`")
         else:
@@ -940,13 +1067,13 @@ def _handle_test_step(step_text: str, tester: TesterAgent, coder: CoderAgent,
     # Detect JS/TS project environment for ESM-aware test generation
     js_env: dict | None = None
     if language in ("javascript", "typescript"):
-        js_env = _read_js_project_env()
+        js_env = _read_js_project_env(subproject_cwd)
         log.info(f"Step {step_idx+1}: JS project env: {js_env}")
 
         # Auto-setup for ESM projects: install @jest/globals if needed
         if js_env.get("is_esm") and not js_env.get("has_jest_globals"):
             display.step_info(step_idx, "ESM project detected, installing @jest/globals...")
-            ok, out = executor.run_command("npm install --save-dev @jest/globals")
+            ok, out = executor.run_command("npm install --save-dev @jest/globals", cwd=subproject_cwd)
             if ok:
                 js_env["has_jest_globals"] = True
                 display.step_info(step_idx, "Installed @jest/globals")
@@ -961,7 +1088,7 @@ def _handle_test_step(step_text: str, tester: TesterAgent, coder: CoderAgent,
                 "  transform: {},\n"
                 "};\n"
             )
-            config_path = "jest.config.js"
+            config_path = os.path.join(subproject_cwd, "jest.config.js") if subproject_cwd else "jest.config.js"
             if not os.path.isfile(config_path):
                 try:
                     with open(config_path, "w", encoding="utf-8") as f:
@@ -1088,8 +1215,8 @@ def _handle_test_step(step_text: str, tester: TesterAgent, coder: CoderAgent,
         prev_output = None
         for run_attempt in range(1, MAX_STEP_RETRIES + 1):
             display.step_info(step_idx, f"Running: {test_cmd} (attempt {run_attempt})...")
-            log.info(f"Step {step_idx+1}: Running test command: {test_cmd}")
-            success, output = executor.run_tests(test_cmd)
+            log.info(f"Step {step_idx+1}: Running test command: {test_cmd}" + (f" in {subproject_cwd}" if subproject_cwd else ""))
+            success, output = executor.run_tests(test_cmd, cwd=subproject_cwd)
             log.info(f"Step {step_idx+1}: Test run output:\n{output or '(no output)'}")
 
             last_test_output = output
@@ -1164,10 +1291,10 @@ def _handle_test_step(step_text: str, tester: TesterAgent, coder: CoderAgent,
                     break
                 display.step_info(step_idx, f"Installing `{actual_tool}`...")
                 log.info(f"Step {step_idx+1}: Installing test runner: {install_cmd}")
-                ok, out = executor.run_command(install_cmd)
+                ok, out = executor.run_command(install_cmd, cwd=subproject_cwd)
                 if ok:
                     display.step_info(step_idx, f"Installed `{actual_tool}`, re-running...")
-                    success, output = executor.run_tests(test_cmd)
+                    success, output = executor.run_tests(test_cmd, cwd=subproject_cwd)
                     last_test_output = output
                     if success:
                         display.step_info(step_idx, "Tests passed after runner install ✔")
@@ -1177,13 +1304,15 @@ def _handle_test_step(step_text: str, tester: TesterAgent, coder: CoderAgent,
             # Auto-install missing packages before asking coder to fix
             missing_pkgs = executor.detect_missing_packages(output)
             if missing_pkgs:
+                install_tool = "npm install --save-dev" if language in ("javascript", "typescript") else ("pip install")
+                
                 display.step_info(step_idx, f"Installing missing packages: {', '.join(missing_pkgs)}")
-                log.info(f"Step {step_idx+1}: Auto-installing: {missing_pkgs}")
-                install_ok, install_out = executor.install_packages(missing_pkgs)
+                log.info(f"Step {step_idx+1}: Auto-installing: {missing_pkgs} with {install_tool}")
+                install_ok, install_out = executor.install_packages(missing_pkgs, tool=install_tool, cwd=subproject_cwd)
                 if install_ok:
                     display.step_info(step_idx, "Packages installed, re-running tests...")
                     log.info(f"Step {step_idx+1}: Re-running test command: {test_cmd}")
-                    success, output = executor.run_tests(test_cmd)
+                    success, output = executor.run_tests(test_cmd, cwd=subproject_cwd)
                     log.info(f"Step {step_idx+1}: Test re-run after install:\n{output or '(no output)'}")
                     last_test_output = output
                     if success:
@@ -1213,6 +1342,20 @@ def _handle_test_step(step_text: str, tester: TesterAgent, coder: CoderAgent,
             display.step_info(step_idx, "Tests failed, asking coder to fix...")
             error_detail = output[:1000] if output else f"(command `{test_cmd}` produced no output — it may have crashed or the test framework may not be installed)"
 
+            # Search the web for error documentation to help the coder fix
+            search_context = ""
+            if search_agent is not None:
+                display.step_info(step_idx, "Searching web for test error fix...")
+                try:
+                    search_context = search_agent.search_for_error(
+                        error_detail, step_text, language=language)
+                    if search_context:
+                        log.info(f"Step {step_idx+1}: Search agent found "
+                                 f"test error documentation")
+                except Exception as exc:
+                    log.warning(f"Step {step_idx+1}: Search agent error "
+                                f"during test fix: {exc}")
+
             # Build a more specific fix prompt that restricts changes to test files
             test_file_list = ", ".join(test_files.keys())
             fix_context = (
@@ -1221,6 +1364,12 @@ def _handle_test_step(step_text: str, tester: TesterAgent, coder: CoderAgent,
                 f"Test files that need fixing: {test_file_list}\n"
                 f"Project files:\n{code_summary}"
             )
+            if search_context:
+                fix_context += (
+                    f"\n\nThe following web search results contain relevant "
+                    f"documentation and solutions for this error. Use them "
+                    f"to inform your fix:\n\n{search_context}"
+                )
             fix_prompt = (
                 "Fix ONLY the test files so tests pass. "
                 "Do NOT modify source files, package.json, or any config files. "

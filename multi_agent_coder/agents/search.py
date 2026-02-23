@@ -69,6 +69,50 @@ class SearchAgent:
             log.warning(f"[SearchAgent] Search failed: {exc}")
             return ""
 
+    def search_for_task(self, task: str,
+                        language: str | None = None) -> str:
+        """Search the web for latest documentation relevant to a task.
+
+        Called **before** the planner generates steps so that local LLMs
+        receive up-to-date, command-level guidance (framework CLI flags,
+        install commands, API changes, etc.).
+
+        Args:
+            task: The user's task description / prompt.
+            language: Programming language (adds focused keywords).
+
+        Returns:
+            Formatted string with search results and page excerpts, or
+            empty string if nothing useful was found or on any error.
+        """
+        try:
+            query = self._build_task_query(task, language)
+            if not query:
+                return ""
+
+            log.info(f"[SearchAgent] Planning search: {query}")
+
+            results = web_search(
+                query,
+                provider=self.provider,
+                api_key=self.api_key,
+                api_url=self.api_url,
+                max_results=self.max_results,
+            )
+
+            if not results:
+                log.info("[SearchAgent] No planning search results found")
+                return ""
+
+            header = ("=== Web Search Context (latest documentation) ===\n"
+                      "Use the information below for accurate, up-to-date "
+                      "commands and flags in your plan.")
+            return self._format_results(results, header=header)
+
+        except Exception as exc:
+            log.warning(f"[SearchAgent] Planning search failed: {exc}")
+            return ""
+
     # ── Internals ────────────────────────────────────────────
 
     def _build_search_query(self, error_info: str,
@@ -96,7 +140,7 @@ class SearchAgent:
             return ""
 
         # Strip file paths and line numbers
-        query = re.sub(r'(?:File\s+)?["\']?[\w/\\.:]+\.(py|js|ts|go|rb|java|rs)\b["\']?',
+        query = re.sub(r'(?:File\s+)?["\']?[\w/\\.:]+\.(py|js|jsx|ts|tsx|go|rb|java|rs)\b["\']?',
                        '', key_line)
         query = re.sub(r',?\s*line\s+\d+', '', query, flags=re.IGNORECASE)
         # Strip ANSI escape codes
@@ -123,6 +167,48 @@ class SearchAgent:
 
         return query
 
+    def _build_task_query(self, task: str,
+                          language: str | None = None) -> str:
+        """Build a documentation-focused search query from a task description.
+
+        Unlike ``_build_search_query`` (which targets error messages), this
+        method extracts **technology keywords** from the user prompt and
+        appends terms like "latest docs guide" so the search engine returns
+        setup guides, CLI references, and recent release notes.
+        """
+        if not task or not task.strip():
+            return ""
+
+        # Strip ANSI codes (just in case)
+        clean = re.sub(r'\x1b\[[0-9;]*m', '', task)
+        # Collapse whitespace
+        clean = re.sub(r'\s+', ' ', clean).strip()
+
+        # Build query: use the task itself (trimmed) + documentation focus
+        query = clean
+
+        # Add language keyword for relevance
+        lang_keywords = {
+            "python": "python",
+            "javascript": "javascript node.js",
+            "typescript": "typescript",
+            "go": "golang",
+            "ruby": "ruby",
+            "java": "java",
+            "rust": "rust",
+        }
+        if language and language in lang_keywords:
+            query = f"{query} {lang_keywords[language]}"
+
+        # Append documentation focus
+        query = f"{query} latest docs guide"
+
+        # Cap length
+        if len(query) > 150:
+            query = query[:150].rsplit(' ', 1)[0]
+
+        return query
+
     @staticmethod
     def _extract_key_error_line(error_info: str) -> str:
         """Find the most informative error line in a traceback/output.
@@ -130,7 +216,8 @@ class SearchAgent:
         Looks for common error patterns:
         - Python: ``SomeError: message``
         - Node.js: ``Error: message`` or ``TypeError: message``
-        - Generic: lines containing "error", "Error", "failed", "FAILED"
+        - Jest/Node: ``Cannot find module``, ``Module not found``
+        - Generic: lines containing "error", "failed"
         """
         lines = error_info.strip().splitlines()
 
@@ -147,21 +234,56 @@ class SearchAgent:
                         r'RangeError|URIError|EvalError):', line):
                 return line
 
-        # Generic: first line containing "error" (case-insensitive)
+        # Jest/Node descriptive errors (no "Error:" prefix but highly
+        # informative — e.g. "Cannot find module '@testing-library/react'")
+        _DESCRIPTIVE_PATTERNS = (
+            r'Cannot find module\b',
+            r'Module not found\b',
+            r'Module build failed\b',
+            r'Failed to compile\b',
+            r'is not defined\b',
+            r'is not a function\b',
+            r'Unexpected token\b',
+            r'Cannot read propert',       # Cannot read property / properties
+            r'command not found\b',
+            r'No such file or directory\b',
+            r'Permission denied\b',
+        )
         for line in lines:
             stripped = line.strip()
-            if stripped and re.search(r'\berror\b', stripped, re.IGNORECASE):
+            if stripped and any(re.search(p, stripped, re.IGNORECASE)
+                               for p in _DESCRIPTIVE_PATTERNS):
                 return stripped
 
-        # Fallback: first non-empty line
+        # Generic: first line containing "error" or "failed" (but skip
+        # bare Jest markers like "FAIL src/App.test.tsx")
         for line in lines:
             stripped = line.strip()
-            if stripped and not stripped.startswith("Traceback"):
+            if not stripped:
+                continue
+            # Skip bare FAIL markers (just "FAIL <path>")
+            if re.match(r'^FAIL\s+\S+$', stripped):
+                continue
+            if re.search(r'\b(error|failed)\b', stripped, re.IGNORECASE):
                 return stripped
+
+        # Fallback: first non-empty line that isn't a bare marker
+        for line in lines:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("Traceback"):
+                continue
+            # Skip bare FAIL/PASS markers
+            if re.match(r'^(FAIL|PASS)\s+\S+$', stripped):
+                continue
+            # Skip Jest section markers (● ...)
+            if stripped.startswith('●'):
+                continue
+            return stripped
 
         return ""
 
-    def _format_results(self, results: list[SearchResult]) -> str:
+    def _format_results(self, results: list[SearchResult], *,
+                        header: str | None = None) -> str:
         """Format search results with fetched page excerpts."""
         sections: list[str] = []
 
@@ -185,5 +307,6 @@ class SearchAgent:
         if not sections:
             return ""
 
-        header = "=== Web Search Results (documentation/solutions found) ==="
+        if header is None:
+            header = "=== Web Search Results (documentation/solutions found) ==="
         return header + "\n\n" + "\n\n".join(sections)

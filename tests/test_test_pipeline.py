@@ -303,7 +303,7 @@ def test_js_env_detection_no_package_json(tmp_path, monkeypatch):
 
 # ── ESM-aware JS test rules tests ────────────────────────────
 
-from multi_agent_coder.agents.tester import TesterAgent
+from multi_agent_coder.agents.tester import TesterAgent as AppTesterAgent
 from multi_agent_coder.language import get_test_framework
 
 
@@ -311,7 +311,7 @@ def test_js_test_rules_esm_includes_jest_globals_import():
     """ESM projects should include @jest/globals import instruction."""
     fw = get_test_framework("javascript")
     env = {"is_esm": True}
-    rules = TesterAgent._js_test_rules("javascript", fw, env_info=env)
+    rules = AppTesterAgent._js_test_rules("javascript", fw, env_info=env)
     assert "@jest/globals" in rules
     assert "import" in rules.lower()
     assert "require" not in rules or "Do NOT use `require()`" in rules
@@ -321,7 +321,7 @@ def test_js_test_rules_cjs_no_globals_import():
     """CJS projects should say globals are available without import."""
     fw = get_test_framework("javascript")
     env = {"is_esm": False}
-    rules = TesterAgent._js_test_rules("javascript", fw, env_info=env)
+    rules = AppTesterAgent._js_test_rules("javascript", fw, env_info=env)
     assert "globally" in rules.lower() or "available" in rules.lower()
     assert "require" in rules
 
@@ -329,7 +329,7 @@ def test_js_test_rules_cjs_no_globals_import():
 def test_js_test_rules_no_env_defaults_to_cjs():
     """No env_info should default to CJS behavior."""
     fw = get_test_framework("javascript")
-    rules = TesterAgent._js_test_rules("javascript", fw)
+    rules = AppTesterAgent._js_test_rules("javascript", fw)
     assert "require" in rules
 
 

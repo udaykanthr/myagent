@@ -306,7 +306,7 @@ class Config:
 
     # Safety: Critical files that require extra care when editing
     CRITICAL_FILES = {
-        # "package.json",
+        "package.json",
         "pyproject.toml",
         "go.mod",
         "pom.xml",

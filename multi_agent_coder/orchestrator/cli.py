@@ -3,6 +3,7 @@ CLI entry point — argument parsing and main execution flow.
 """
 
 import argparse
+import sys
 
 from ..config import Config
 from ..llm.ollama import OllamaClient
@@ -34,6 +35,13 @@ from .pipeline import build_step_waves, _execute_step, _run_diagnosis_loop
 
 
 def main():
+    # Dispatch `agentchanti kb ...` to the KB CLI before argparse sees it,
+    # so the KB subcommand tree is fully independent of the main task args.
+    if len(sys.argv) > 1 and sys.argv[1] == "kb":
+        from ..kb.cli import kb_main
+        kb_main(sys.argv[2:])
+        return
+
     parser = argparse.ArgumentParser(description="AgentChanti — Multi-Agent Local Coder")
     parser.add_argument("task", nargs="?", help="The coding task to perform")
     parser.add_argument("--prompt-from-file", help="Read prompt from a text file")

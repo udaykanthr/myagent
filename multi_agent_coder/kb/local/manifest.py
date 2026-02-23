@@ -20,12 +20,13 @@ logger = logging.getLogger(__name__)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS files (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    path          TEXT    UNIQUE NOT NULL,
-    hash          TEXT    NOT NULL,
-    language      TEXT    NOT NULL DEFAULT '',
-    last_modified REAL    NOT NULL DEFAULT 0.0,
-    indexed_at    REAL    NOT NULL DEFAULT 0.0
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    path                TEXT    UNIQUE NOT NULL,
+    hash                TEXT    NOT NULL,
+    language            TEXT    NOT NULL DEFAULT '',
+    last_modified       REAL    NOT NULL DEFAULT 0.0,
+    indexed_at          REAL    NOT NULL DEFAULT 0.0,
+    last_embedded_hash  TEXT    DEFAULT NULL
 );
 
 CREATE TABLE IF NOT EXISTS symbols (
@@ -41,6 +42,11 @@ CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);
 CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(file_id);
 CREATE INDEX IF NOT EXISTS idx_files_path   ON files(path);
 """
+
+# Applied to existing databases missing newer columns (Phase 2 migration).
+_MIGRATIONS = [
+    "ALTER TABLE files ADD COLUMN last_embedded_hash TEXT DEFAULT NULL",
+]
 
 
 @dataclass
@@ -99,9 +105,15 @@ class Manifest:
             conn.close()
 
     def _init_db(self) -> None:
-        """Create tables if they do not exist."""
+        """Create tables and run any pending schema migrations."""
         with self._connect() as conn:
             conn.executescript(_SCHEMA)
+            # Apply migrations idempotently (ignore "duplicate column" errors).
+            for stmt in _MIGRATIONS:
+                try:
+                    conn.execute(stmt)
+                except Exception:
+                    pass
 
     # ------------------------------------------------------------------
     # Public API
@@ -252,6 +264,54 @@ class Manifest:
             )
             for r in rows
         ]
+
+    def get_embedded_hash(self, path: str) -> Optional[str]:
+        """
+        Return the last embedded hash for *path*, or None if not set.
+
+        Parameters
+        ----------
+        path:
+            File path to look up.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT last_embedded_hash FROM files WHERE path = ?", (path,)
+            ).fetchone()
+        if row is None:
+            return None
+        return row["last_embedded_hash"]
+
+    def set_embedded_hash(self, path: str, hash_: str) -> None:
+        """
+        Update the last_embedded_hash for *path*.
+
+        Parameters
+        ----------
+        path:
+            File path to update.
+        hash_:
+            The file content hash at the time of embedding.
+        """
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE files SET last_embedded_hash = ? WHERE path = ?",
+                (hash_, path),
+            )
+
+    def get_files_needing_embed(self) -> list[tuple[str, str]]:
+        """
+        Return (path, hash) pairs for files whose hash differs from
+        last_embedded_hash (i.e., need re-embedding).
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT path, hash FROM files
+                WHERE last_embedded_hash IS NULL OR last_embedded_hash != hash
+                """
+            ).fetchall()
+        return [(r["path"], r["hash"]) for r in rows]
 
     def find_symbol(self, name: str, symbol_type: Optional[str] = None) -> list[dict]:
         """

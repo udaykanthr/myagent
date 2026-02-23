@@ -20,6 +20,10 @@ class KBFileHandler:
     """
     Watchdog-compatible event handler that triggers incremental KB updates.
 
+    After updating the graph for a changed file, optionally triggers
+    incremental re-embedding of that file's symbols via the Phase 2
+    embedder if *vector_store* is provided.
+
     Parameters
     ----------
     indexer:
@@ -29,6 +33,9 @@ class KBFileHandler:
     debounce_seconds:
         Minimum delay between processing the same file (prevents rapid
         re-indexing on editor auto-saves).
+    vector_store:
+        Optional :class:`~agentchanti.kb.local.vector_store.QdrantStore`.
+        When provided, changed files are re-embedded after the graph update.
     """
 
     def __init__(
@@ -36,12 +43,14 @@ class KBFileHandler:
         indexer,
         project_root: str,
         debounce_seconds: float = 0.5,
+        vector_store=None,
     ) -> None:
         self._indexer = indexer
         self._project_root = os.path.abspath(project_root)
         self._debounce = debounce_seconds
         self._last_event: dict[str, float] = {}
         self._lock = threading.Lock()
+        self._vector_store = vector_store
 
     # ------------------------------------------------------------------
     # Watchdog event dispatch
@@ -122,6 +131,11 @@ class KBFileHandler:
             self._indexer.update_file(rel_path)
         except Exception as exc:
             logger.warning("[KB watcher] Error processing %s: %s", rel_path, exc)
+            return
+
+        # Phase 2: re-embed this file's symbols if a vector store is attached.
+        if self._vector_store is not None:
+            self._trigger_incremental_embed(rel_path)
 
     def _handle_delete(self, abs_path: str) -> None:
         """Process a file deletion event."""
@@ -136,6 +150,53 @@ class KBFileHandler:
             self._indexer.remove_file(rel_path)
         except Exception as exc:
             logger.warning("[KB watcher] Error removing %s: %s", rel_path, exc)
+            return
+
+        # Phase 2: remove Qdrant points for this file.
+        if self._vector_store is not None:
+            try:
+                self._vector_store.delete_by_file(rel_path)
+                logger.info("[KB watcher] Removed Qdrant points for %s", rel_path)
+            except Exception as exc:
+                logger.warning(
+                    "[KB watcher] Failed to remove Qdrant points for %s: %s",
+                    rel_path, exc
+                )
+
+    def _trigger_incremental_embed(self, rel_path: str) -> None:
+        """
+        Re-embed the symbols for *rel_path* in a background thread.
+
+        Parameters
+        ----------
+        rel_path:
+            Relative file path that was just updated in the graph.
+        """
+        import threading
+
+        def _do_embed() -> None:
+            try:
+                from .embedder import embed_file_symbols
+                from .manifest import Manifest
+                from .indexer import _manifest_path
+
+                manifest = Manifest(_manifest_path(self._project_root))
+                graph = self._indexer.load_graph()
+                embed_file_symbols(
+                    file_path=rel_path,
+                    graph=graph,
+                    manifest=manifest,
+                    vector_store=self._vector_store,
+                    project_root=self._project_root,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[KB watcher] Incremental embed failed for %s: %s",
+                    rel_path, exc,
+                )
+
+        t = threading.Thread(target=_do_embed, daemon=True, name=f"kb-embed-{rel_path}")
+        t.start()
 
 
 class KBWatcher:
@@ -154,13 +215,17 @@ class KBWatcher:
         Configured :class:`~agentchanti.kb.local.indexer.Indexer`.
     project_root:
         Directory to watch.
+    vector_store:
+        Optional :class:`~agentchanti.kb.local.vector_store.QdrantStore`.
+        When provided, changed files are re-embedded automatically after
+        each incremental graph update (Phase 2 integration).
     """
 
-    def __init__(self, indexer, project_root: str) -> None:
+    def __init__(self, indexer, project_root: str, vector_store=None) -> None:
         self._indexer = indexer
         self._project_root = os.path.abspath(project_root)
         self._observer: Optional[object] = None
-        self._handler = KBFileHandler(indexer, project_root)
+        self._handler = KBFileHandler(indexer, project_root, vector_store=vector_store)
 
     def start(self) -> None:
         """

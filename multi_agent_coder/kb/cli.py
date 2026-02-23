@@ -6,14 +6,25 @@ Knowledge Base code graph.
 
 Commands
 --------
-agentchanti kb index              -- full re-index of current project
-agentchanti kb index --watch      -- full index then start file watcher
-agentchanti kb status             -- show graph_meta.json summary
+agentchanti kb index                           -- full re-index of current project
+agentchanti kb index --watch                   -- full index then start file watcher
+agentchanti kb status                          -- show graph_meta.json summary
 agentchanti kb query find-callers <function_name>
 agentchanti kb query find-callees <function_name>
 agentchanti kb query find-refs    <symbol_name>
 agentchanti kb query impact       <file_path>
 agentchanti kb query symbol       <name>
+
+Phase 2 — Semantic Layer
+agentchanti kb embed               -- embed all symbols (full)
+agentchanti kb embed --incremental -- embed only changed symbols
+agentchanti kb search "<query>"    -- semantic search
+agentchanti kb search "<query>" --top-k 5
+agentchanti kb search "<query>" --filter file=src/auth
+agentchanti kb search "<query>" --filter language=python
+agentchanti kb qdrant start        -- start Qdrant Docker container
+agentchanti kb qdrant stop         -- stop Qdrant Docker container
+agentchanti kb qdrant status       -- show Qdrant status
 """
 
 from __future__ import annotations
@@ -225,6 +236,157 @@ def _cmd_query(args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Phase 2 sub-command handlers
+# ---------------------------------------------------------------------------
+
+def _cmd_embed(args: argparse.Namespace) -> None:
+    """Embed project symbols into Qdrant."""
+    project_root = _project_root()
+    _require_index(project_root)
+
+    from .local.indexer import Indexer, _manifest_path
+    from .local.manifest import Manifest
+    from .local.vector_store import QdrantStore, is_qdrant_running
+    from .local.embedder import embed_project
+
+    if not is_qdrant_running():
+        print(
+            "Qdrant is not running. Start it with:\n"
+            "  agentchanti kb qdrant start"
+        )
+        sys.exit(1)
+
+    indexer = Indexer(project_root)
+    try:
+        graph = indexer.load_graph()
+    except FileNotFoundError:
+        print("Graph not found. Run `agentchanti kb index` first.", file=sys.stderr)
+        sys.exit(1)
+
+    manifest = Manifest(_manifest_path(project_root))
+    vector_store = QdrantStore(project_root)
+
+    incremental = getattr(args, "incremental", False)
+    mode = "incremental" if incremental else "full"
+    print(f"Embedding project symbols ({mode} mode): {project_root}")
+
+    import time as _time
+    t0 = _time.perf_counter()
+    summary = embed_project(
+        graph=graph,
+        manifest=manifest,
+        vector_store=vector_store,
+        project_root=project_root,
+        incremental=incremental,
+    )
+    elapsed = _time.perf_counter() - t0
+
+    print(
+        f"\nEmbed complete:\n"
+        f"  Total symbols : {summary['total_symbols']}\n"
+        f"  Embedded      : {summary['embedded']}\n"
+        f"  Skipped       : {summary['skipped']}\n"
+        f"  Errors        : {summary['errors']}\n"
+        f"  Time          : {elapsed:.1f}s"
+    )
+
+
+def _cmd_search(args: argparse.Namespace) -> None:
+    """Semantic search over the knowledge base."""
+    project_root = _project_root()
+    _require_index(project_root)
+
+    query: str = args.query
+    top_k: int = getattr(args, "top_k", 10)
+    filter_str: Optional[str] = getattr(args, "filter", None)
+
+    filters: Optional[dict] = None
+    if filter_str:
+        try:
+            key, val = filter_str.split("=", 1)
+            filters = {key.strip(): val.strip()}
+        except ValueError:
+            print(
+                f"Invalid --filter format '{filter_str}'. "
+                "Use: --filter key=value  (e.g. --filter language=python)",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    from .local.indexer import Indexer, _manifest_path
+    from .local.manifest import Manifest
+    from .local.vector_store import QdrantStore
+    from .local.searcher import Searcher
+
+    indexer = Indexer(project_root)
+    try:
+        graph = indexer.load_graph()
+    except FileNotFoundError:
+        print("Graph not found. Run `agentchanti kb index` first.", file=sys.stderr)
+        sys.exit(1)
+
+    manifest = Manifest(_manifest_path(project_root))
+    vector_store = QdrantStore(project_root)
+    searcher = Searcher(
+        graph=graph,
+        manifest=manifest,
+        vector_store=vector_store,
+        project_root=project_root,
+    )
+
+    import time as _time
+    t0 = _time.perf_counter()
+    results = searcher.search(query=query, filters=filters, top_k=top_k)
+    elapsed_ms = (_time.perf_counter() - t0) * 1000
+
+    if not results:
+        print(f"No results found for: {query!r}")
+        return
+
+    print(f"\nSearch results for: {query!r}  [{len(results)} result(s)]")
+    print("-" * 70)
+    for i, r in enumerate(results, 1):
+        print(f"\n  [{i}] {r.symbol_type}: {r.symbol_name}")
+        print(f"       File   : {r.file}:{r.line_start}-{r.line_end}")
+        print(f"       Score  : {r.score:.4f}")
+        if r.code_snippet:
+            snippet_lines = r.code_snippet.splitlines()
+            preview = "\n         ".join(snippet_lines[:5])
+            if len(snippet_lines) > 5:
+                preview += f"\n         ... ({len(snippet_lines) - 5} more lines)"
+            print(f"       Code   :\n         {preview}")
+        if r.related_symbols:
+            print(f"       Related ({len(r.related_symbols)}):")
+            for rel in r.related_symbols[:5]:
+                node_type = rel.get("node_type", "")
+                name = rel.get("name", "")
+                fp = rel.get("file_path", "")
+                ls = rel.get("line_start", 0)
+                print(f"         {node_type}: {name} ({fp}:{ls})")
+
+    print(f"\n  Search time: {elapsed_ms:.1f}ms")
+
+
+def _cmd_qdrant(args: argparse.Namespace) -> None:
+    """Dispatch qdrant subcommands."""
+    from .local.vector_store import qdrant_start, qdrant_stop, qdrant_status
+
+    qdrant_cmd = args.qdrant_cmd
+
+    if qdrant_cmd == "start":
+        project_root = _project_root()
+        qdrant_start(project_root)
+    elif qdrant_cmd == "stop":
+        qdrant_stop()
+    elif qdrant_cmd == "status":
+        qdrant_status()
+    else:
+        print(f"Unknown qdrant command: {qdrant_cmd}", file=sys.stderr)
+        print("Available: start, stop, status", file=sys.stderr)
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
 
@@ -264,6 +426,46 @@ def _build_parser() -> argparse.ArgumentParser:
     ]:
         qp = query_sub.add_parser(qname, help=qhelp)
         qp.add_argument("name", nargs="?", help="Target name to look up")
+
+    # --- embed ---
+    embed_p = subparsers.add_parser(
+        "embed", help="Embed project symbols into Qdrant (Phase 2)"
+    )
+    embed_p.add_argument(
+        "--incremental", action="store_true",
+        help="Only embed symbols from files that changed since last embed",
+    )
+    embed_p.set_defaults(func=_cmd_embed)
+
+    # --- search ---
+    search_p = subparsers.add_parser(
+        "search", help="Semantic search over the knowledge base (Phase 2)"
+    )
+    search_p.add_argument("query", help="Natural-language search query")
+    search_p.add_argument(
+        "--top-k", dest="top_k", type=int, default=10,
+        help="Number of results to return (default: 10)",
+    )
+    search_p.add_argument(
+        "--filter", dest="filter", default=None, metavar="KEY=VALUE",
+        help="Payload filter, e.g. --filter language=python or --filter file=src/auth",
+    )
+    search_p.set_defaults(func=_cmd_search)
+
+    # --- qdrant ---
+    qdrant_p = subparsers.add_parser(
+        "qdrant", help="Manage the local Qdrant Docker container (Phase 2)"
+    )
+    qdrant_sub = qdrant_p.add_subparsers(dest="qdrant_cmd", metavar="ACTION")
+    qdrant_sub.required = True
+    qdrant_p.set_defaults(func=_cmd_qdrant)
+
+    for qname, qhelp in [
+        ("start",  "Start the Qdrant Docker container"),
+        ("stop",   "Stop the Qdrant Docker container"),
+        ("status", "Show Qdrant container status"),
+    ]:
+        qdrant_sub.add_parser(qname, help=qhelp)
 
     return parser
 

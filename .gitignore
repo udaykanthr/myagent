@@ -29,3 +29,11 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+
+# AgentChanti runtime artifacts
+.agentchanti/kb/local/graph.pkl
+.agentchanti/kb/local/index.db
+.agentchanti/kb/local/graph_meta.json
+.agentchanti/kb/local/qdrant/
+.agentchanti/reports/
+.agentchanti_checkpoint.json

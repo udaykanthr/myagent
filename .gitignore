@@ -29,3 +29,6 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+
+.agentchanti.yaml
+.agentchanti/

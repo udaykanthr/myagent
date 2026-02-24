@@ -43,7 +43,7 @@ _DEFAULTS = {
     "search_api_url": "",
     "search_max_results": 3,
     "search_max_page_chars": 3000,
-    "kb_registry_owner": "",
+    "kb_registry_owner": "udaykanthr",
     "kb_registry_repo": "agentchanti-kb-registry",
     "kb_registry_auto_update": True,
     "pricing": {

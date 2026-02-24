@@ -500,6 +500,104 @@ class Executor:
         )
         return any(re.search(p, cmd) for p in patterns)
 
+    # ── Unix → Windows command translation ──
+
+    @staticmethod
+    def _rewrite_unix_cmd_for_windows(cmd: str) -> str:
+        """Rewrite common Unix/bash commands to Windows cmd.exe equivalents.
+
+        LLMs frequently generate Unix-style shell commands regardless of the
+        host OS.  This translates the most common ones so they work under
+        ``cmd.exe`` on Windows.  Compound commands chained with ``&&`` or
+        ``||`` are split, each segment is rewritten, and reassembled.
+        """
+        segments = re.split(r'(\s*&&\s*|\s*\|\|\s*)', cmd)
+        rewritten = False
+        result = []
+
+        for seg in segments:
+            if re.match(r'\s*(?:&&|\|\|)\s*$', seg):
+                result.append(seg)
+                continue
+            original = seg.strip()
+            new_seg = Executor._rewrite_single_unix_cmd(original)
+            if new_seg != original:
+                rewritten = True
+                result.append(new_seg)
+            else:
+                result.append(seg)
+
+        if rewritten:
+            final = ''.join(result)
+            log.info(f"[Executor] Rewrote Unix → Windows: {cmd!r}")
+            return final
+        return cmd
+
+    @staticmethod
+    def _rewrite_single_unix_cmd(cmd: str) -> str:
+        """Translate a single Unix command to its Windows cmd.exe equivalent."""
+
+        # mkdir -p dir1 dir2 → mkdir "dir1" 2>nul & mkdir "dir2" 2>nul
+        m = re.match(r'^mkdir\s+-p\s+(.+)', cmd)
+        if m:
+            dirs = m.group(1).strip().split()
+            return '; '.join(f'mkdir "{d}" 2>$nul' for d in dirs if d)
+
+        # touch file1 file2 → create empty files
+        m = re.match(r'^touch\s+(.+)', cmd)
+        if m:
+            files = m.group(1).strip().split()
+            return ' & '.join(f'copy nul "{f}" >$nul 2>&1' for f in files if f)
+
+        # rm [-rf] target(s) → rmdir /s /q or del /f /q
+        m = re.match(r'^rm\s+((?:-\S+\s+)*)(.+)', cmd)
+        if m:
+            flag_str, targets_str = m.group(1), m.group(2).strip()
+            flags = set()
+            for tok in flag_str.split():
+                if tok.startswith('-'):
+                    flags.update(tok[1:])
+            targets = targets_str.split()
+            if 'r' in flags or 'R' in flags:
+                return ' & '.join(
+                    f'(rmdir /s /q "{t}" 2>$nul & del /f /q "{t}" 2>$nul)'
+                    for t in targets if t
+                )
+            elif flags:
+                return ' & '.join(
+                    f'del /f /q "{t}" 2>$nul' for t in targets if t
+                )
+            else:
+                return ' & '.join(
+                    f'del /q "{t}" 2>$nul' for t in targets if t
+                )
+
+        # cp -r src dst → xcopy /E /I /Y "src" "dst"
+        m = re.match(r'^cp\s+-[rR]\s+(\S+)\s+(\S+)$', cmd)
+        if m:
+            return f'xcopy /E /I /Y "{m.group(1)}" "{m.group(2)}"'
+
+        # mv src dst → move /Y "src" "dst"
+        m = re.match(r'^mv\s+(\S+)\s+(\S+)$', cmd)
+        if m:
+            return f'move /Y "{m.group(1)}" "{m.group(2)}"'
+
+        # chmod → no-op on Windows
+        if re.match(r'^chmod\s+', cmd):
+            return 'echo chmod skipped >nul'
+
+        # export VAR=value → set VAR=value
+        m = re.match(r'^export\s+(\w+)=(.*)', cmd)
+        if m:
+            return f'set "{m.group(1)}={m.group(2)}"'
+
+        # which binary → where binary
+        m = re.match(r'^which\s+(\S+)$', cmd)
+        if m:
+            return f'where "{m.group(1)}" 2>nul'
+
+        return cmd
+
     def run_command(self, cmd: str, env: dict | None = None,
                     timeout: int = 120, background: bool = False,
                     cwd: str | None = None) -> Tuple[bool, str]:
@@ -517,6 +615,10 @@ class Executor:
         try:
             log.info(f"[Executor] Running {'background ' if background else ''}command: {cmd}"
                      f"{f' (cwd={cwd})' if cwd else ''}")
+            # Translate Unix commands to Windows cmd.exe equivalents
+            if os.name == 'nt':
+                cmd = Executor._rewrite_unix_cmd_for_windows(cmd)
+
             if os.name == 'nt' and Executor._needs_powershell(cmd):
                 # Escape double quotes inside the command for PowerShell
                 escaped = cmd.replace('"', '\\"')

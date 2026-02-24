@@ -374,9 +374,9 @@ class QdrantStore:
             if conditions:
                 qdrant_filter = Filter(must=conditions)
 
-        results = client.search(
+        results = client.query_points(
             collection_name=self._collection,
-            query_vector=query_vector,
+            query=query_vector,
             limit=top_k,
             query_filter=qdrant_filter,
             with_payload=True,
@@ -384,7 +384,7 @@ class QdrantStore:
 
         return [
             {"score": hit.score, "payload": hit.payload or {}}
-            for hit in results
+            for hit in results.points
         ]
 
     # ------------------------------------------------------------------

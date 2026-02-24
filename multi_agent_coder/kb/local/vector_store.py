@@ -374,6 +374,7 @@ class QdrantStore:
             if conditions:
                 qdrant_filter = Filter(must=conditions)
 
+        self.ensure_collection()
         results = client.query_points(
             collection_name=self._collection,
             query=query_vector,

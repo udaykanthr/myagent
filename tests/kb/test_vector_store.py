@@ -133,8 +133,11 @@ class TestQdrantStore:
             "line_end": 25,
         }
 
+        mock_result = MagicMock()
+        mock_result.points = [mock_hit]
+
         mock_client = MagicMock()
-        mock_client.search.return_value = [mock_hit]
+        mock_client.query_points.return_value = mock_result
         store._client = mock_client
 
         with patch(

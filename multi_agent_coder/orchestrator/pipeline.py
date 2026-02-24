@@ -2,6 +2,7 @@
 Pipeline execution — wave-based parallel/sequential step execution.
 """
 
+import logging
 import re
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -15,6 +16,8 @@ from .step_handlers import (
     MAX_STEP_RETRIES,
 )
 from .diagnosis import _diagnose_failure, _apply_fix
+
+_logger = logging.getLogger(__name__)
 
 
 MAX_DIAGNOSIS_RETRIES = 2   # outer retries: diagnose failure → fix → re-run step
@@ -147,13 +150,37 @@ def _execute_step(step_idx: int, step_text: str, *,
                   task: str, memory: FileMemory, display: CLIDisplay,
                   language: str | None, cfg=None,
                   auto: bool = False,
-                  search_agent=None) -> tuple[int, bool, str]:
+                  search_agent=None,
+                  kb_context_builder=None) -> tuple[int, bool, str]:
     """Execute a single step. Returns ``(step_idx, success, error_info)``.
 
     Catches all exceptions so that a crash inside any handler never
     kills the whole pipeline — the step is marked as failed instead.
     """
     try:
+        # --- KB Context Injection (Phase 4) ---
+        if kb_context_builder is not None:
+            try:
+                from ..kb.context_builder import ContextBuilder
+                kb_ctx = kb_context_builder.build_context(
+                    task_description=step_text,
+                    current_file=None,
+                    max_tokens=getattr(cfg, "KB_MAX_CONTEXT_TOKENS", 4000) if cfg else 4000,
+                )
+                if kb_ctx.kb_available or kb_ctx.behavioral_instructions:
+                    kb_text = kb_context_builder.format_context_for_prompt(kb_ctx)
+                    if kb_text:
+                        # Inject into coder's context via memory's kb_context
+                        memory._kb_context = kb_text
+                _logger.debug(
+                    "[KB] Injected context: %d tokens, sources: %s, "
+                    "symbols: %d, errors: %d",
+                    kb_ctx.token_count, kb_ctx.sources_used,
+                    len(kb_ctx.local_symbols), len(kb_ctx.error_fixes),
+                )
+            except Exception as kb_exc:
+                _logger.warning("[KB] Context injection failed: %s", kb_exc)
+
         log.info(f"\n{'='*60}\nTask {step_idx+1}: {step_text}\n"
                  f"Memory: {memory.summary()}\n{'='*60}")
 
@@ -207,7 +234,8 @@ def _run_diagnosis_loop(step_idx: int, step_text: str, error_info: str, *,
                         task: str, memory: FileMemory, display: CLIDisplay,
                         language: str | None, cfg=None,
                         auto: bool = False,
-                        search_agent=None) -> bool:
+                        search_agent=None,
+                        kb_context_builder=None) -> bool:
     """Run diagnose → fix → retry loop. Returns ``True`` if the step was fixed.
 
     All exceptions are caught so that a crash during diagnosis (e.g. an
@@ -284,6 +312,7 @@ def _run_diagnosis_loop(step_idx: int, step_text: str, error_info: str, *,
                 task=task, memory=memory, display=display,
                 language=language, cfg=cfg, auto=auto,
                 search_agent=search_agent,
+                kb_context_builder=kb_context_builder,
             )
 
             if success:

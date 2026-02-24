@@ -551,6 +551,20 @@ def _cmd_global_search(args: argparse.Namespace) -> None:
     print(f"\n  Search time: {elapsed_ms:.1f}ms")
 
 
+def _cmd_health(args: argparse.Namespace) -> None:
+    """Show overall KB health report."""
+    from .health import check, format_health, to_json
+
+    project_root = _project_root()
+    health = check(project_root)
+
+    use_json = getattr(args, "json", False)
+    if use_json:
+        print(to_json(health))
+    else:
+        print(format_health(health))
+
+
 def _cmd_update(args: argparse.Namespace) -> None:
     """Check for or download global KB updates from GitHub registry."""
     from ..config import Config
@@ -743,6 +757,20 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Update only a specific category (errors, patterns, adrs, docs, behavioral)",
     )
     update_p.set_defaults(func=_cmd_update)
+
+    # =======================================================================
+    # Phase 4 — Health check
+    # =======================================================================
+
+    # --- health ---
+    health_p = subparsers.add_parser(
+        "health", help="Show overall KB health report"
+    )
+    health_p.add_argument(
+        "--json", action="store_true",
+        help="Machine-readable JSON output",
+    )
+    health_p.set_defaults(func=_cmd_health)
 
     return parser
 

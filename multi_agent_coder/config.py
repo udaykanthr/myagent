@@ -46,6 +46,11 @@ _DEFAULTS = {
     "kb_registry_owner": "udaykanthr",
     "kb_registry_repo": "agentchanti-kb-registry",
     "kb_registry_auto_update": True,
+    "kb_enabled": True,
+    "kb_max_context_tokens": 4000,
+    "kb_auto_index_on_start": True,
+    "kb_watcher_debounce_seconds": 1.0,
+    "kb_verbose_logging": False,
     "pricing": {
         "gpt-4o": {"input": 2.50, "output": 10.00},
         "gpt-4o-mini": {"input": 0.15, "output": 0.60},
@@ -251,6 +256,33 @@ class Config:
             "KB_REGISTRY_AUTO_UPDATE", "kb_registry_auto_update",
             _DEFAULTS["kb_registry_auto_update"])
 
+        # KB context injection (Phase 4)
+        kb_section = yd.get("kb", {}) if isinstance(yd.get("kb"), dict) else {}
+        self.KB_ENABLED = _get_bool(
+            "KB_ENABLED",
+            "kb_enabled",
+            kb_section.get("enabled", _DEFAULTS["kb_enabled"]),
+        )
+        self.KB_MAX_CONTEXT_TOKENS = int(
+            os.getenv("KB_MAX_CONTEXT_TOKENS")
+            or kb_section.get("max_context_tokens", _DEFAULTS["kb_max_context_tokens"])
+        )
+        self.KB_AUTO_INDEX_ON_START = _get_bool(
+            "KB_AUTO_INDEX_ON_START",
+            "kb_auto_index_on_start",
+            kb_section.get("auto_index_on_start", _DEFAULTS["kb_auto_index_on_start"]),
+        )
+        self.KB_WATCHER_DEBOUNCE_SECONDS = float(
+            os.getenv("KB_WATCHER_DEBOUNCE_SECONDS")
+            or kb_section.get("watcher_debounce_seconds",
+                              _DEFAULTS["kb_watcher_debounce_seconds"])
+        )
+        self.KB_VERBOSE_LOGGING = _get_bool(
+            "KB_VERBOSE_LOGGING",
+            "kb_verbose_logging",
+            kb_section.get("verbose_logging", _DEFAULTS["kb_verbose_logging"]),
+        )
+
         # Plugins
         self.PLUGINS: list[str] = yd.get("plugins", _DEFAULTS["plugins"])
         if not isinstance(self.PLUGINS, list):
@@ -300,6 +332,13 @@ class Config:
             "kb_registry_owner": self.KB_REGISTRY_OWNER,
             "kb_registry_repo": self.KB_REGISTRY_REPO,
             "kb_registry_auto_update": self.KB_REGISTRY_AUTO_UPDATE,
+            "kb": {
+                "enabled": self.KB_ENABLED,
+                "max_context_tokens": self.KB_MAX_CONTEXT_TOKENS,
+                "auto_index_on_start": self.KB_AUTO_INDEX_ON_START,
+                "watcher_debounce_seconds": self.KB_WATCHER_DEBOUNCE_SECONDS,
+                "verbose_logging": self.KB_VERBOSE_LOGGING,
+            },
         }
 
     def to_yaml(self) -> str:

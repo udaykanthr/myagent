@@ -43,6 +43,9 @@ _DEFAULTS = {
     "search_api_url": "",
     "search_max_results": 3,
     "search_max_page_chars": 3000,
+    "kb_registry_owner": "",
+    "kb_registry_repo": "agentchanti-kb-registry",
+    "kb_registry_auto_update": True,
     "pricing": {
         "gpt-4o": {"input": 2.50, "output": 10.00},
         "gpt-4o-mini": {"input": 0.15, "output": 0.60},
@@ -237,6 +240,17 @@ class Config:
                                            _DEFAULTS["search_max_page_chars"],
                                            cast=int)
 
+        # Global KB registry
+        self.KB_REGISTRY_OWNER = _get(
+            "KB_REGISTRY_OWNER", "kb_registry_owner",
+            _DEFAULTS["kb_registry_owner"])
+        self.KB_REGISTRY_REPO = _get(
+            "KB_REGISTRY_REPO", "kb_registry_repo",
+            _DEFAULTS["kb_registry_repo"])
+        self.KB_REGISTRY_AUTO_UPDATE = _get_bool(
+            "KB_REGISTRY_AUTO_UPDATE", "kb_registry_auto_update",
+            _DEFAULTS["kb_registry_auto_update"])
+
         # Plugins
         self.PLUGINS: list[str] = yd.get("plugins", _DEFAULTS["plugins"])
         if not isinstance(self.PLUGINS, list):
@@ -283,6 +297,9 @@ class Config:
             "search_api_url": self.SEARCH_API_URL,
             "search_max_results": self.SEARCH_MAX_RESULTS,
             "search_max_page_chars": self.SEARCH_MAX_PAGE_CHARS,
+            "kb_registry_owner": self.KB_REGISTRY_OWNER,
+            "kb_registry_repo": self.KB_REGISTRY_REPO,
+            "kb_registry_auto_update": self.KB_REGISTRY_AUTO_UPDATE,
         }
 
     def to_yaml(self) -> str:

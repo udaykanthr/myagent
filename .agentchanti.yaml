@@ -28,6 +28,9 @@ report_dir: .agentchanti/reports
 step_cache_ttl_hours: 24
 plugins: []
 budget_limit: 0.0
+kb_registry_owner: ''
+kb_registry_repo: agentchanti-kb-registry
+kb_registry_auto_update: true
 pricing:
   gpt-4o:
     input: 2.5

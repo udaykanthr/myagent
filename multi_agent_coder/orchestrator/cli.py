@@ -86,6 +86,8 @@ def main():
                          help="Disable web search agent for planning and error diagnosis")
     parser.add_argument("--no-kb", action="store_true",
                          help="Disable KB context injection (debugging)")
+    parser.add_argument("--per-step-review", action="store_true",
+                         help="Review code per-step instead of deferred post-pipeline review")
     args = parser.parse_args()
 
     # ── 0. Load config ──
@@ -108,6 +110,8 @@ def main():
         cfg.LANGUAGE = args.language
     if args.no_stream:
         cfg.STREAM_RESPONSES = False
+    if args.per_step_review:
+        cfg.DEFERRED_REVIEW = False
 
     # ── 0.5. Generate YAML and exit ──
     if args.generate_config:
@@ -480,9 +484,10 @@ def main():
         memory = FileMemory(embedding_store=embed_store, top_k=cfg.EMBEDDING_TOP_K)
 
         # Pre-load existing source files into memory so the coder
-        # can see and modify them instead of creating new files
+        # can see and modify them instead of creating new files.
+        # Uses preload() so they aren't flagged as modified for deferred review.
         if source_files:
-            memory.update(source_files)
+            memory.preload(source_files)
             log.info(f"Pre-loaded {len(source_files)} source files into memory")
 
     # ── 12. Build execution waves ──
@@ -620,6 +625,26 @@ def main():
 
             if not pipeline_success:
                 break
+
+    # ── 13b. Deferred review (if enabled) ──
+    if pipeline_success and getattr(cfg, "DEFERRED_REVIEW", False):
+        from .step_handlers import _run_deferred_review
+        log.info("Starting deferred file-level review pass...")
+        review_passed, failed_files = _run_deferred_review(
+            memory=memory,
+            reviewer=reviewer,
+            coder=coder,
+            executor=executor,
+            task=args.task,
+            display=display,
+            language=language,
+            cfg=cfg,
+            auto=args.auto,
+        )
+        if not review_passed:
+            log.warning(f"Deferred review failed: {len(failed_files)} file(s) "
+                        f"with unresolved issues: {failed_files}")
+            pipeline_success = False
 
     # ── 14. Populate step reports from display state ──
     for i, sr in enumerate(step_reports):

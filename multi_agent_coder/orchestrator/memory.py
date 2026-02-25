@@ -23,6 +23,7 @@ class FileMemory:
     def __init__(self, embedding_store: EmbeddingStore | None = None,
                  top_k: int = 5):
         self._files: dict[str, str] = {}   # filepath -> contents
+        self._modified_paths: set[str] = set()  # files changed during pipeline
         self._store = embedding_store
         self._top_k = top_k
         self._lock = threading.Lock()
@@ -48,6 +49,7 @@ class FileMemory:
                     continue
 
                 self._files[fpath] = content
+                self._modified_paths.add(fpath)
                 if self._store:
                     self._store.add(fpath, content)
 
@@ -55,9 +57,27 @@ class FileMemory:
         with self._lock:
             return self._files.get(filepath)
 
+    def preload(self, files: dict[str, str]):
+        """Load pre-existing files without marking them as modified.
+
+        Use this for source files that exist before the pipeline runs so
+        they are excluded from deferred review.
+        """
+        with self._lock:
+            for fpath, content in files.items():
+                self._files[fpath] = content
+                if self._store:
+                    self._store.add(fpath, content)
+
     def all_files(self) -> dict[str, str]:
         with self._lock:
             return dict(self._files)
+
+    def modified_files(self) -> dict[str, str]:
+        """Return only files that were modified during the pipeline run."""
+        with self._lock:
+            return {k: v for k, v in self._files.items()
+                    if k in self._modified_paths}
 
     def as_dict(self) -> dict[str, str]:
         """Snapshot for checkpoint serialization."""

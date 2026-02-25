@@ -241,7 +241,7 @@ def _execute_step(step_idx: int, step_text: str, *,
             success, error_info = _handle_test_step(
                 step_text, tester, coder, reviewer, executor,
                 task, memory, display, step_idx, language=language,
-                auto=auto, search_agent=search_agent)
+                auto=auto, search_agent=search_agent, cfg=cfg)
             display.complete_step(step_idx, "done" if success else "failed")
 
         else:

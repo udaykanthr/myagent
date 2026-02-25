@@ -26,6 +26,27 @@ from ..diff_display import show_diffs, prompt_diff_approval, _detect_hazards
 
 
 MAX_STEP_RETRIES = 3  # Used for code steps and test run/fix attempts
+MAX_DEFERRED_FIX_RETRIES = 3  # Max fix attempts per file in deferred review
+
+# Shared review approval/critical keyword lists (used by both per-step and deferred review)
+_REVIEW_APPROVAL_PHRASES = (
+    "code looks good",
+    "looks good",
+    "no issues",
+    "no critical issues",
+    "no bugs found",
+    "code is correct",
+    "functionally correct",
+    "lgtm",
+)
+
+_REVIEW_CRITICAL_KEYWORDS = (
+    "error", "bug", "crash", "undefined", "missing import",
+    "will fail", "won't work", "does not work", "broken",
+    "incorrect", "wrong", "typeerror", "nameerror",
+    "syntaxerror", "attributeerror", "keyerror",
+    "referenceerror",
+)
 
 # Map test runner binary → install command
 _RUNNER_INSTALL = {
@@ -919,6 +940,12 @@ def _handle_code_step(step_text: str, coder: CoderAgent, reviewer: ReviewerAgent
             log.info(f"Step {step_idx+1}: Skipped review (non-code files: {list(files.keys())})")
             return True, ""
 
+        # If deferred review is enabled, skip per-step review
+        if cfg and getattr(cfg, "DEFERRED_REVIEW", False):
+            display.step_info(step_idx, "Review deferred ✔")
+            log.info(f"Step {step_idx+1}: Review deferred (DEFERRED_REVIEW=True)")
+            return True, ""
+
         # Review — pass step description so reviewer scopes to this step
         display.step_info(step_idx, "Reviewing code...")
         sent_before = token_tracker.total_prompt_tokens
@@ -941,16 +968,8 @@ def _handle_code_step(step_text: str, coder: CoderAgent, reviewer: ReviewerAgent
 
         review_lower = review.lower()
         # Accept if the reviewer explicitly approves
-        approved = any(phrase in review_lower for phrase in (
-            "code looks good",
-            "looks good",
-            "no issues",
-            "no critical issues",
-            "no bugs found",
-            "code is correct",
-            "functionally correct",
-            "lgtm",
-        ))
+        approved = any(phrase in review_lower
+                       for phrase in _REVIEW_APPROVAL_PHRASES)
 
         if approved:
             display.step_info(step_idx, "Review passed ✔")
@@ -959,13 +978,8 @@ def _handle_code_step(step_text: str, coder: CoderAgent, reviewer: ReviewerAgent
         # On the last attempt, accept the code if the review only has
         # minor/style suggestions (no keywords indicating actual bugs)
         if attempt == MAX_STEP_RETRIES:
-            has_critical = any(kw in review_lower for kw in (
-                "error", "bug", "crash", "undefined", "missing import",
-                "will fail", "won't work", "does not work", "broken",
-                "incorrect", "wrong", "typeerror", "nameerror",
-                "syntaxerror", "attributeerror", "keyerror",
-                "referenceerror",
-            ))
+            has_critical = any(kw in review_lower
+                               for kw in _REVIEW_CRITICAL_KEYWORDS)
             if not has_critical:
                 display.step_info(step_idx, "Review has only minor suggestions, accepting ✔")
                 log.info(f"Step {step_idx+1}: Accepted on last attempt "
@@ -1090,7 +1104,8 @@ def _handle_test_step(step_text: str, tester: TesterAgent, coder: CoderAgent,
                       display: CLIDisplay, step_idx: int,
                       language: str | None = None,
                       auto: bool = False,
-                      search_agent=None) -> tuple[bool, str]:
+                      search_agent=None,
+                      cfg: Config | None = None) -> tuple[bool, str]:
     # Detect sub-project (if the test targets a nested folder)
     subproject_cwd = _detect_subproject_root(memory)
 
@@ -1229,47 +1244,48 @@ def _handle_test_step(step_text: str, tester: TesterAgent, coder: CoderAgent,
             display.step_info(step_idx, "No valid test files after filtering, retrying...")
             continue
 
-        # Review tests
-        display.step_info(step_idx, "Reviewing tests...")
-        sent_before = token_tracker.total_prompt_tokens
-        recv_before = token_tracker.total_completion_tokens
+        # Review tests (skip if deferred review is enabled)
+        if cfg and getattr(cfg, "DEFERRED_REVIEW", False):
+            display.step_info(step_idx, "Test review deferred ✔")
+            log.info(f"Step {step_idx+1}: Test review deferred (DEFERRED_REVIEW=True)")
+            test_approved = True
+        else:
+            display.step_info(step_idx, "Reviewing tests...")
+            sent_before = token_tracker.total_prompt_tokens
+            recv_before = token_tracker.total_completion_tokens
 
-        review = reviewer.process(
-            f"Review these tests for correctness, especially import paths:\n{test_response}",
-            context=f"Project files: {memory.summary()}\n{code_summary}",
-            language=language,
-        )
+            review = reviewer.process(
+                f"Review these tests for correctness, especially import paths:\n{test_response}",
+                context=f"Project files: {memory.summary()}\n{code_summary}",
+                language=language,
+            )
 
-        sent_delta = token_tracker.total_prompt_tokens - sent_before
-        recv_delta = token_tracker.total_completion_tokens - recv_before
-        display.step_tokens(step_idx, sent_delta, recv_delta)
+            sent_delta = token_tracker.total_prompt_tokens - sent_before
+            recv_delta = token_tracker.total_completion_tokens - recv_before
+            display.step_tokens(step_idx, sent_delta, recv_delta)
 
-        if review:
-            display.add_llm_log(review, source="Reviewer")
+            if review:
+                display.add_llm_log(review, source="Reviewer")
 
-        log.info(f"Step {step_idx+1}: Test review:\n{review}")
+            log.info(f"Step {step_idx+1}: Test review:\n{review}")
 
-        review_lower = review.lower()
-        test_approved = any(phrase in review_lower for phrase in (
-            "code looks good", "looks good", "no issues",
-            "no critical issues", "no bugs found", "code is correct",
-            "functionally correct", "lgtm", "tests look good",
-        ))
+            review_lower = review.lower()
+            test_approved = any(phrase in review_lower
+                                for phrase in _REVIEW_APPROVAL_PHRASES
+                                ) or "tests look good" in review_lower
 
-        # On last attempt, accept if no critical issues found
-        if not test_approved and gen_attempt == MAX_TEST_GEN_RETRIES:
-            has_critical = any(kw in review_lower for kw in (
-                "error", "bug", "crash", "undefined", "missing import",
-                "will fail", "won't work", "incorrect", "wrong import",
-            ))
-            if not has_critical:
-                test_approved = True
-                log.info(f"Step {step_idx+1}: Test accepted on last attempt (minor issues only)")
+            # On last attempt, accept if no critical issues found
+            if not test_approved and gen_attempt == MAX_TEST_GEN_RETRIES:
+                has_critical = any(kw in review_lower
+                                   for kw in _REVIEW_CRITICAL_KEYWORDS)
+                if not has_critical:
+                    test_approved = True
+                    log.info(f"Step {step_idx+1}: Test accepted on last attempt (minor issues only)")
 
-        if not test_approved:
-            feedback = review
-            display.step_info(step_idx, "Test review found issues, regenerating...")
-            continue
+            if not test_approved:
+                feedback = review
+                display.step_info(step_idx, "Test review found issues, regenerating...")
+                continue
 
         # Show diffs and wait for approval before writing test files
         approved = prompt_diff_approval(test_files, auto=auto)
@@ -1758,3 +1774,219 @@ def _log_fallback_metric(
         })
     except Exception:
         pass
+
+
+# ---------------------------------------------------------------------------
+# Deferred file-level review (post-pipeline)
+# ---------------------------------------------------------------------------
+
+def _run_deferred_review(
+    *,
+    memory: FileMemory,
+    reviewer: ReviewerAgent,
+    coder: CoderAgent,
+    executor: Executor,
+    task: str,
+    display: CLIDisplay,
+    language: str | None = None,
+    cfg: Config | None = None,
+    auto: bool = False,
+) -> tuple[bool, list[str]]:
+    """Review all modified files after the pipeline completes.
+
+    Returns ``(all_passed, list_of_failed_files)``.
+
+    For each file in ``memory.modified_files()``:
+    1. Skip non-code files and internal tracking files.
+    2. Send file content to the reviewer.
+    3. If review finds issues, send file + feedback to the coder for fixing.
+    4. Re-review the fixed file (up to MAX_DEFERRED_FIX_RETRIES attempts).
+    5. On last attempt, accept if no critical keywords found.
+    """
+    all_files = memory.modified_files()
+    if not all_files:
+        return True, []
+
+    # Filter to reviewable code files only
+    review_candidates: list[str] = []
+    for fpath in all_files:
+        # Skip internal tracking files
+        if fpath.startswith("_"):
+            continue
+        # Skip non-code files
+        if _all_non_code_files([fpath]):
+            continue
+        review_candidates.append(fpath)
+
+    if not review_candidates:
+        return True, []
+
+    failed_files: list[str] = []
+    context_window = cfg.CONTEXT_WINDOW if cfg else 8192
+    ctx_budget = int(context_window * 0.8)
+
+    log.info(f"[DeferredReview] Starting review of {len(review_candidates)} file(s)")
+    display.step_info(0, f"Deferred review: {len(review_candidates)} file(s)...")
+
+    lang_tag = get_code_block_lang(language) if language else "python"
+
+    for file_idx, fpath in enumerate(review_candidates):
+        content = all_files.get(fpath)
+        if not content:
+            continue
+
+        file_passed = False
+        display.step_info(0, f"Reviewing [{file_idx+1}/{len(review_candidates)}]: {fpath}")
+
+        for attempt in range(1, MAX_DEFERRED_FIX_RETRIES + 1):
+            # Build review prompt with full file content
+            review_task = (
+                f"Review this complete file for correctness:\n\n"
+                f"#### [FILE]: {fpath}\n```{lang_tag}\n{content}\n```"
+            )
+
+            # Build context with all project files for import validation
+            other_files = {k: v for k, v in memory.all_files().items()
+                          if k != fpath and not k.startswith("_")}
+            context_parts = [f"Task: {task}"]
+            if other_files:
+                file_listing = "\n".join(f"  - {f}" for f in other_files)
+                context_parts.append(f"Known project files:\n{file_listing}")
+                # Include content of related files for import validation
+                related = memory.related_context(fpath, max_tokens=ctx_budget)
+                if related:
+                    context_parts.append(f"Related files:\n{related}")
+
+            review_context = "\n\n".join(context_parts)
+
+            # Call reviewer
+            log.info(f"[DeferredReview] Reviewing {fpath} "
+                     f"(attempt {attempt}/{MAX_DEFERRED_FIX_RETRIES})")
+            sent_before = token_tracker.total_prompt_tokens
+            recv_before = token_tracker.total_completion_tokens
+
+            review = reviewer.process(
+                review_task,
+                context=review_context,
+                language=language,
+            )
+
+            sent_delta = token_tracker.total_prompt_tokens - sent_before
+            recv_delta = token_tracker.total_completion_tokens - recv_before
+            display.step_tokens(0, sent_delta, recv_delta)
+
+            if review:
+                display.add_llm_log(review, source="Reviewer")
+            log.info(f"[DeferredReview] {fpath}: Review:\n{review}")
+
+            # Check approval
+            review_lower = review.lower()
+            approved = any(phrase in review_lower
+                           for phrase in _REVIEW_APPROVAL_PHRASES)
+
+            if approved:
+                display.step_info(0, f"Review passed: {fpath} ✔")
+                file_passed = True
+                break
+
+            # On last attempt, accept if no critical issues
+            if attempt == MAX_DEFERRED_FIX_RETRIES:
+                has_critical = any(kw in review_lower
+                                   for kw in _REVIEW_CRITICAL_KEYWORDS)
+                if not has_critical:
+                    display.step_info(
+                        0, f"Minor suggestions only, accepting: {fpath} ✔")
+                    log.info(f"[DeferredReview] {fpath}: Accepted on last "
+                             f"attempt (no critical keywords)")
+                    file_passed = True
+                    break
+
+            # Fix: send file + feedback to coder
+            display.step_info(
+                0, f"Fixing {fpath} (attempt {attempt}/{MAX_DEFERRED_FIX_RETRIES})...")
+
+            fix_context_parts = [f"Task: {task}"]
+            related = memory.related_context(fpath, max_tokens=ctx_budget)
+            if related:
+                fix_context_parts.append(f"Existing files:\n{related}")
+            fix_context_parts.append(f"Review feedback:\n{review}")
+            fix_context_parts.append(
+                "CRITICAL: Only fix the specific issues mentioned in the "
+                "feedback above. Do NOT modify any code that is unrelated to "
+                "the feedback. Preserve ALL existing content, formatting, and "
+                "special characters exactly as they are. Only output this file."
+            )
+
+            fix_task = (
+                f"Fix the issues found in this file:\n\n"
+                f"#### [FILE]: {fpath}\n```{lang_tag}\n{content}\n```"
+            )
+
+            sent_before = token_tracker.total_prompt_tokens
+            recv_before = token_tracker.total_completion_tokens
+
+            fix_response = coder.process(
+                fix_task,
+                context="\n\n".join(fix_context_parts),
+                language=language,
+            )
+
+            sent_delta = token_tracker.total_prompt_tokens - sent_before
+            recv_delta = token_tracker.total_completion_tokens - recv_before
+            display.step_tokens(0, sent_delta, recv_delta)
+
+            explanation = CLIDisplay.extract_explanation(fix_response)
+            if explanation:
+                display.add_llm_log(explanation, source="Coder")
+
+            # Parse fixed file
+            fix_files = executor.parse_code_blocks(fix_response)
+            if not fix_files:
+                fix_files = executor.parse_code_blocks_fuzzy(fix_response)
+
+            if fix_files:
+                # Normalize paths
+                fix_files = _normalize_fix_paths(fix_files, memory)
+
+                # Get the content for our target file
+                fixed_content = fix_files.get(fpath)
+                if fixed_content is None:
+                    # Maybe the coder used a different path
+                    for fp, fc in fix_files.items():
+                        if fp.endswith(os.path.basename(fpath)):
+                            fixed_content = fc
+                            break
+
+                if fixed_content:
+                    # Show diff and approve
+                    diff_files = {fpath: fixed_content}
+                    approved_diff = prompt_diff_approval(diff_files, auto=auto)
+                    if approved_diff:
+                        executor.write_files(diff_files)
+                        memory.update(diff_files)
+                        content = fixed_content  # Update for next review
+                        display.step_info(0, f"Fixed: {fpath}")
+                    else:
+                        display.step_info(0, f"Fix rejected by user: {fpath}")
+                        log.info(f"[DeferredReview] User rejected fix for {fpath}")
+                        break
+                else:
+                    log.warning(f"[DeferredReview] Coder did not return {fpath}")
+            else:
+                log.warning(f"[DeferredReview] No files parsed from fix "
+                            f"response for {fpath}")
+
+        if not file_passed:
+            failed_files.append(fpath)
+
+    all_passed = len(failed_files) == 0
+    if all_passed:
+        log.info("[DeferredReview] All files passed review ✔")
+        display.step_info(0, f"Deferred review complete: all {len(review_candidates)} file(s) passed ✔")
+    else:
+        log.warning(f"[DeferredReview] {len(failed_files)} file(s) failed: "
+                    f"{failed_files}")
+        display.step_info(0, f"Deferred review: {len(failed_files)} file(s) "
+                          f"with unresolved issues")
+
+    return all_passed, failed_files

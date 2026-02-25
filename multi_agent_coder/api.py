@@ -65,6 +65,7 @@ def run_task(
     no_git: bool = True,
     no_kb: bool = False,
     auto: bool = True,
+    deferred_review: bool = True,
     config_path: str | None = None,
     working_dir: str | None = None,
 ) -> TaskResult:
@@ -80,6 +81,7 @@ def run_task(
         no_git: Disable git integration (default True for library use).
         no_kb: Disable KB context injection.
         auto: Non-interactive mode (default True for library use).
+        deferred_review: Review files once after all steps (default True).
         config_path: Explicit path to ``.agentchanti.yaml``.
         working_dir: Working directory for the task (default: CWD).
 
@@ -96,7 +98,8 @@ def run_task(
         return _run_task_impl(
             task, provider=provider, model=model, embed_model=embed_model,
             language=language, no_embeddings=no_embeddings,
-            no_git=no_git, no_kb=no_kb, auto=auto, config_path=config_path,
+            no_git=no_git, no_kb=no_kb, auto=auto,
+            deferred_review=deferred_review, config_path=config_path,
         )
     finally:
         os.chdir(original_dir)
@@ -106,11 +109,13 @@ def _run_task_impl(
     task: str, *, provider: str, model: str | None,
     embed_model: str | None, language: str | None,
     no_embeddings: bool, no_git: bool, no_kb: bool,
-    auto: bool, config_path: str | None,
+    auto: bool, deferred_review: bool, config_path: str | None,
 ) -> TaskResult:
     """Internal implementation of run_task."""
 
     cfg = Config.load(config_path)
+    if not deferred_review:
+        cfg.DEFERRED_REVIEW = False
     model = model or cfg.DEFAULT_MODEL
     embed_model = embed_model or cfg.EMBEDDING_MODEL
 
@@ -250,9 +255,10 @@ def _run_task_impl(
             "[KB] Project orientation failed (non-fatal): %s", orient_exc,
         )
 
-    # Pre-load existing source files into memory
+    # Pre-load existing source files into memory.
+    # Uses preload() so they aren't flagged as modified for deferred review.
     if source_files:
-        memory.update(source_files)
+        memory.preload(source_files)
 
     # Plan
     planner_context = f"Existing project:\n{project_context}" if project_context else ""
@@ -306,6 +312,25 @@ def _run_task_impl(
 
         if not pipeline_success:
             break
+
+    # Deferred review (if enabled)
+    if pipeline_success and getattr(cfg, "DEFERRED_REVIEW", False):
+        from .orchestrator.step_handlers import _run_deferred_review
+        review_passed, failed_files = _run_deferred_review(
+            memory=memory,
+            reviewer=reviewer,
+            coder=coder,
+            executor=executor,
+            task=task,
+            display=display,
+            language=language,
+            cfg=cfg,
+            auto=auto,
+        )
+        if not review_passed:
+            _logger.warning(f"Deferred review failed: {len(failed_files)} "
+                            f"file(s) with unresolved issues: {failed_files}")
+            pipeline_success = False
 
     # Stop KB runtime watcher
     if kb_runtime_watcher is not None:

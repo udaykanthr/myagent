@@ -58,6 +58,7 @@ _DEFAULTS = {
     "editing_validate_syntax": True,
     "editing_track_metrics": True,
     "editing_fallback_on_syntax_error": True,
+    "deferred_review": True,
     "pricing": {
         "gpt-4o": {"input": 2.50, "output": 10.00},
         "gpt-4o-mini": {"input": 0.15, "output": 0.60},
@@ -327,6 +328,12 @@ class Config:
                                 _DEFAULTS["editing_fallback_on_syntax_error"]),
         )
 
+        # Deferred review — review files once after all steps complete
+        self.DEFERRED_REVIEW = _get_bool(
+            "DEFERRED_REVIEW", "deferred_review",
+            _DEFAULTS["deferred_review"],
+        )
+
         # Plugins
         self.PLUGINS: list[str] = yd.get("plugins", _DEFAULTS["plugins"])
         if not isinstance(self.PLUGINS, list):
@@ -383,6 +390,7 @@ class Config:
                 "watcher_debounce_seconds": self.KB_WATCHER_DEBOUNCE_SECONDS,
                 "verbose_logging": self.KB_VERBOSE_LOGGING,
             },
+            "deferred_review": self.DEFERRED_REVIEW,
             "editing": {
                 "diff_mode": self.EDITING_DIFF_MODE,
                 "min_confidence_threshold": self.EDITING_MIN_CONFIDENCE,

@@ -815,7 +815,7 @@ def _handle_code_step(step_text: str, coder: CoderAgent, reviewer: ReviewerAgent
                       auto: bool = False,
                       code_graph=None,
                       project_profile=None) -> tuple[bool, str]:
-    # --- Diff-aware editing path ---
+    # --- Tier 1: Diff-aware editing (requires KB graph + high confidence) ---
     if cfg and getattr(cfg, "EDITING_DIFF_MODE", False) and code_graph is not None:
         diff_result = _try_diff_edit(
             step_text=step_text, coder=coder, task=task,
@@ -825,8 +825,20 @@ def _handle_code_step(step_text: str, coder: CoderAgent, reviewer: ReviewerAgent
         )
         if diff_result is not None:
             return diff_result
-        # diff_result is None → fallback to full-file flow below
 
+    # --- Tier 2: Chunk edit (regex-based, no KB graph needed) ---
+    if cfg and getattr(cfg, "EDITING_CHUNK_MODE", True):
+        chunk_result = _try_chunk_edit(
+            step_text=step_text, coder=coder, reviewer=reviewer,
+            executor=executor, task=task, memory=memory,
+            display=display, step_idx=step_idx,
+            language=language, cfg=cfg, auto=auto,
+            project_profile=project_profile,
+        )
+        if chunk_result is not None:
+            return chunk_result
+
+    # --- Tier 3: Full-file flow (fallback) ---
     feedback = ""
     context_window = cfg.CONTEXT_WINDOW if cfg else 8192
     ctx_budget = int(context_window * 0.8)
@@ -842,9 +854,21 @@ def _handle_code_step(step_text: str, coder: CoderAgent, reviewer: ReviewerAgent
                 pass
 
         context = context_prefix + f"Task: {task}"
-        related = memory.related_context(step_text, max_tokens=ctx_budget)
-        if related:
-            context += f"\nExisting files (overwrite as needed):\n{related}"
+        # Use slim context for non-target files when enabled
+        use_slim = cfg and getattr(cfg, "EDITING_SLIM_CONTEXT", True)
+        targets = _detect_target_files(step_text, memory) if use_slim else []
+        if use_slim and targets:
+            slim = memory.related_context_slim(step_text, max_tokens=ctx_budget)
+            if slim:
+                context += f"\nProject file structures:\n{slim}"
+            for tf in targets:
+                tf_content = memory.get(tf)
+                if tf_content:
+                    context += f"\n\n#### [FILE]: {tf}\n```\n{tf_content}\n```"
+        else:
+            related = memory.related_context(step_text, max_tokens=ctx_budget)
+            if related:
+                context += f"\nExisting files (overwrite as needed):\n{related}"
         if memory.summary() != "(no files yet)":
             context += f"\nAll project files: {memory.summary()}"
         if feedback:
@@ -924,11 +948,21 @@ def _handle_code_step(step_text: str, coder: CoderAgent, reviewer: ReviewerAgent
         sent_before = token_tracker.total_prompt_tokens
         recv_before = token_tracker.total_completion_tokens
 
-        review = reviewer.process(
-            f"Review this code for the step: {step_text}\n\n{response}",
-            context=f"Step: {step_text}\nOnly review changes relevant to this step.",
-            language=language,
-        )
+        use_diff_review = cfg and getattr(cfg, "EDITING_REVIEWER_DIFF_MODE", True)
+        if use_diff_review:
+            review_ctx = _build_review_context(files, memory, step_text)
+            review = reviewer.process(
+                f"Review this code change for the step: {step_text}\n\n{review_ctx}",
+                context=f"Step: {step_text}\nReview ONLY the changes shown.",
+                language=language,
+                review_mode="diff",
+            )
+        else:
+            review = reviewer.process(
+                f"Review this code for the step: {step_text}\n\n{response}",
+                context=f"Step: {step_text}\nOnly review changes relevant to this step.",
+                language=language,
+            )
 
         sent_delta = token_tracker.total_prompt_tokens - sent_before
         recv_delta = token_tracker.total_completion_tokens - recv_before
@@ -1698,6 +1732,295 @@ def _detect_target_file(step_text: str, memory: FileMemory) -> str | None:
     if len(known_files) == 1:
         return known_files[0]
 
+    return None
+
+
+def _detect_target_files(step_text: str, memory: FileMemory,
+                         max_files: int = 3) -> list[str]:
+    """Identify ALL target files for editing from the step text."""
+    import re as _re
+
+    known_files = list(memory.all_files().keys())
+    found: list[str] = []
+    found_set: set[str] = set()
+
+    def _add(fpath: str) -> None:
+        if fpath not in found_set and len(found) < max_files:
+            if os.path.isfile(fpath):
+                found.append(fpath)
+                found_set.add(fpath)
+
+    for fpath in known_files:
+        if fpath in step_text:
+            _add(fpath)
+
+    for fpath in known_files:
+        basename = os.path.basename(fpath)
+        if basename and basename in step_text and basename.count(".") > 0:
+            _add(fpath)
+
+    path_pattern = _re.compile(r'[\w/\\]+\.\w{1,5}')
+    for m in path_pattern.finditer(step_text):
+        candidate = m.group().replace("\\", "/")
+        for fpath in known_files:
+            if fpath.endswith(candidate) or candidate.endswith(fpath):
+                _add(fpath)
+
+    if not found and len(known_files) == 1:
+        _add(known_files[0])
+
+    return found
+
+
+def _build_chunk_prompt(
+    task_description: str,
+    formatted_chunks: str,
+    slim_context: str,
+    language: str | None = None,
+) -> str:
+    """Build the LLM prompt for chunk-level editing."""
+    lang_tag = language or "python"
+    return f"""You are editing existing code. You receive CHUNKS of files, not full files.
+You MUST respond ONLY with the chunks you want to change.
+Do NOT output unchanged chunks. Do NOT output full files.
+Do NOT use #### [FILE]: markers. Use #### [EDIT]: markers instead.
+
+Task: {task_description}
+
+{slim_context}
+
+{formatted_chunks}
+
+For EACH chunk you want to change, use EXACTLY this format:
+
+#### [EDIT]: {{file_path}}:{{function_or_class_name}} (lines {{start}}-{{end}})
+```{lang_tag}
+// complete replacement for this chunk only
+```
+
+For adding a NEW function/class, use:
+
+#### [NEW]: {{file_path}} (after line {{line_number}})
+```{lang_tag}
+// new code to insert
+```
+
+Rules:
+1. Only output chunks that ACTUALLY CHANGE
+2. Include the COMPLETE replacement chunk (not a partial diff)
+3. Preserve the function/class signature unless the task requires changing it
+4. Match the existing indentation style exactly
+5. Use the exact file paths shown in the context above
+6. The line numbers MUST match the line ranges shown in EDITABLE markers
+"""
+
+
+def _build_review_context(
+    new_files: dict[str, str],
+    memory: FileMemory,
+    step_text: str,
+) -> str:
+    """Build a compact review context showing only what changed."""
+    import difflib
+
+    parts: list[str] = []
+
+    for fpath, new_content in new_files.items():
+        old_content = memory.get(fpath)
+        if old_content is None and os.path.isfile(fpath):
+            try:
+                with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+                    old_content = f.read()
+            except OSError:
+                pass
+
+        if old_content is not None:
+            old_lines = old_content.splitlines(keepends=True)
+            new_lines = new_content.splitlines(keepends=True)
+            diff = difflib.unified_diff(
+                old_lines, new_lines,
+                fromfile=f"a/{fpath}", tofile=f"b/{fpath}",
+                n=3,
+            )
+            diff_text = "".join(diff)
+            if diff_text.strip():
+                parts.append(f"#### Changes in {fpath}:\n```diff\n{diff_text}```")
+            else:
+                parts.append(f"#### {fpath}: no changes")
+        else:
+            parts.append(f"#### [NEW FILE]: {fpath}\n```\n{new_content}\n```")
+
+    return "\n\n".join(parts)
+
+
+def _try_chunk_edit(
+    *,
+    step_text: str,
+    coder: CoderAgent,
+    reviewer: ReviewerAgent,
+    executor: Executor,
+    task: str,
+    memory: FileMemory,
+    display: CLIDisplay,
+    step_idx: int,
+    language: str | None,
+    cfg: Config,
+    auto: bool = False,
+    project_profile=None,
+) -> tuple[bool, str] | None:
+    """Attempt chunk-level editing. Returns (success, error) or None for fallback."""
+    try:
+        from ..editing.chunk_editor import ChunkEditor
+    except ImportError:
+        return None
+
+    max_files = getattr(cfg, "EDITING_MAX_CHUNK_FILES", 3)
+    target_files = _detect_target_files(step_text, memory, max_files=max_files)
+    if not target_files:
+        log.debug("[ChunkEdit] No target files identified")
+        return None
+
+    chunk_editor = ChunkEditor()
+    all_chunks: list = []
+    all_target_ids: list[str] = []
+
+    for fpath in target_files:
+        content = memory.get(fpath)
+        if content is None:
+            try:
+                with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read()
+            except OSError:
+                continue
+
+        chunks = chunk_editor.chunk_file(fpath, content)
+        if not chunks:
+            continue
+
+        targets = chunk_editor.identify_target_chunks(chunks, step_text)
+        if not targets:
+            targets = [c.chunk_id for c in chunks if c.chunk_type != "imports"]
+
+        all_chunks.extend(chunks)
+        all_target_ids.extend(targets)
+
+    if not all_chunks:
+        log.debug("[ChunkEdit] No chunks extracted")
+        return None
+
+    formatted = chunk_editor.format_chunks_for_prompt(all_chunks, all_target_ids)
+
+    slim_ctx = ""
+    if getattr(cfg, "EDITING_SLIM_CONTEXT", True):
+        slim_ctx = memory.related_context_slim(
+            step_text,
+            max_tokens=int((cfg.CONTEXT_WINDOW if cfg else 8192) * 0.3),
+        )
+        for tf in target_files:
+            pattern = f"#### [FILE_STRUCTURE]: {tf}"
+            if pattern in slim_ctx:
+                start = slim_ctx.find(pattern)
+                next_entry = slim_ctx.find("\n\n#### [FILE_STRUCTURE]:", start + 1)
+                if next_entry != -1:
+                    slim_ctx = slim_ctx[:start] + slim_ctx[next_entry + 2:]
+                else:
+                    slim_ctx = slim_ctx[:start].rstrip()
+
+    prompt_prefix = ""
+    if project_profile is not None:
+        try:
+            prompt_prefix = project_profile.format_for_prompt() + "\n\n"
+        except Exception:
+            pass
+
+    chunk_prompt = prompt_prefix + _build_chunk_prompt(
+        step_text, formatted, slim_ctx, language=language,
+    )
+
+    display.step_info(step_idx, f"[ChunkEdit] Sending {len(all_target_ids)} target chunks...")
+    sent_before = token_tracker.total_prompt_tokens
+    recv_before = token_tracker.total_completion_tokens
+
+    llm_response = coder.llm_client.generate_response(chunk_prompt)
+
+    sent_delta = token_tracker.total_prompt_tokens - sent_before
+    recv_delta = token_tracker.total_completion_tokens - recv_before
+    display.step_tokens(step_idx, sent_delta, recv_delta)
+
+    edits = chunk_editor.parse_chunk_response(llm_response)
+    if edits is None:
+        log.info("[ChunkEdit] LLM used full-file format or no edits parsed, falling back")
+        return None
+
+    edits_by_file: dict[str, list] = {}
+    for edit in edits:
+        edits_by_file.setdefault(edit.file_path, []).append(edit)
+
+    result_files: dict[str, str] = {}
+    for fpath, file_edits in edits_by_file.items():
+        original = memory.get(fpath)
+        if original is None:
+            try:
+                with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+                    original = f.read()
+            except OSError:
+                log.warning("[ChunkEdit] Cannot read original file: %s", fpath)
+                continue
+
+        try:
+            result_files[fpath] = chunk_editor.apply_chunk_edits(original, file_edits)
+        except Exception as exc:
+            log.warning("[ChunkEdit] Failed to apply edits to %s: %s", fpath, exc)
+            return None
+
+    if not result_files:
+        return None
+
+    approved = prompt_diff_approval(result_files, auto=auto)
+    if not approved:
+        display.step_info(step_idx, "Changes rejected by user")
+        return False, "User rejected chunk edits."
+
+    written = executor.write_files(result_files)
+    memory.update(result_files)
+    display.step_info(step_idx, f"[ChunkEdit] Written: {', '.join(written)}")
+
+    if _all_non_code_files(list(result_files.keys())):
+        display.step_info(step_idx, "Non-code files, skipping review")
+        return True, ""
+
+    review_ctx = _build_review_context(result_files, memory, step_text)
+    reviewer_mode = "diff" if getattr(cfg, "EDITING_REVIEWER_DIFF_MODE", True) else "full"
+
+    display.step_info(step_idx, "Reviewing changes...")
+    sent_before = token_tracker.total_prompt_tokens
+    recv_before = token_tracker.total_completion_tokens
+
+    review = reviewer.process(
+        f"Review this code change for the step: {step_text}\n\n{review_ctx}",
+        context=f"Step: {step_text}\nReview ONLY the changes shown.",
+        language=language,
+        review_mode=reviewer_mode,
+    )
+
+    sent_delta = token_tracker.total_prompt_tokens - sent_before
+    recv_delta = token_tracker.total_completion_tokens - recv_before
+    display.step_tokens(step_idx, sent_delta, recv_delta)
+
+    if review:
+        display.add_llm_log(review, source="Reviewer")
+
+    review_lower = review.lower()
+    approved = any(phrase in review_lower for phrase in (
+        "code looks good", "looks good", "no issues", "no critical issues",
+        "no bugs found", "code is correct", "functionally correct", "lgtm",
+    ))
+
+    if approved:
+        display.step_info(step_idx, "Review passed")
+        return True, ""
+
+    log.info("[ChunkEdit] Review found issues, falling back to full-file for retry")
     return None
 
 

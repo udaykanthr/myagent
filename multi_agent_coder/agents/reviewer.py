@@ -3,16 +3,52 @@ from ..language import get_language_name
 
 
 class ReviewerAgent(Agent):
-    def process(self, task: str, context: str = "", language: str | None = None) -> str:
+    def process(self, task: str, context: str = "", language: str | None = None,
+                review_mode: str = "full") -> str:
         prompt = self._build_prompt(task, context, language=language)
         lang_name = get_language_name(language) if language else "Python"
 
-        # Extract known file paths from context for import validation
+        if review_mode == "diff":
+            prompt += self._diff_review_prompt(lang_name)
+        else:
+            prompt += self._full_review_prompt(lang_name, context)
+
+        return self.llm_client.generate_response(prompt)
+
+    @staticmethod
+    def _diff_review_prompt(lang_name: str) -> str:
+        """Compact review prompt for diff/chunk-based reviews."""
+        return f"""
+
+You are reviewing a CODE DIFF for correctness. You see only the changed lines
+and their surrounding context. Language: {lang_name}
+
+──────── FOCUS ON ────────
+1. Will the changes work correctly at runtime?
+2. Are imports/references still valid after these changes?
+3. Any type mismatches, missing error handling, or undefined variables
+   in the CHANGED code?
+4. Do the changes match the stated task?
+
+──────── DO NOT FLAG ────────
+- Code style, naming, or formatting
+- Unchanged code visible in context
+- Performance suggestions (unless it causes a bug)
+- Missing features not related to the task
+
+──────── OUTPUT FORMAT ────────
+If changes are correct: Respond with EXACTLY: "Code looks good."
+If any issue: **FAIL**: <file> — <description>
+"""
+
+    @staticmethod
+    def _full_review_prompt(lang_name: str, context: str) -> str:
+        """Full review prompt (existing behavior)."""
         import re
         known_files = re.findall(r"####\s*\[FILE\]:\s*(\S+)", context)
         file_listing = "\n".join(f"  - {f}" for f in known_files) if known_files else "(no file listing available)"
 
-        prompt += f"""
+        return f"""
 
 You are a STRICT code reviewer. Your job is to catch issues that WILL cause
 runtime failures, test failures, or import errors. Language: {lang_name}
@@ -80,4 +116,3 @@ If ANY check fails, list EACH issue as:
 Be SPECIFIC. Say which import is wrong and what it should be.
 Do NOT say "Code looks good" if you found any issue above.
 """
-        return self.llm_client.generate_response(prompt)

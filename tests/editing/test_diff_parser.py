@@ -12,6 +12,11 @@ Here is the diff:
 
 @@DIFF_START@@
 FILE: src/auth.py
+<<<<<<< ORIGINAL (line 15)
+        user = self.db.find(username)
+        if user is None:
+            return False
+=======
     def authenticate_user(self, username, password):
         if not username or not password:
             return False
@@ -19,27 +24,45 @@ FILE: src/auth.py
         if user is None:
             return False
         return user.check_password(password)
+>>>>>>> UPDATED
 @@DIFF_END@@
 """
 
 VALID_MULTI_FILE_DIFF = """\
 @@DIFF_START@@
 FILE: src/auth.py
+<<<<<<< ORIGINAL (line 1)
+def old_validate(data):
+    return True
+=======
 def validate_input(data):
     if not data:
         raise ValueError("empty data")
     return True
+>>>>>>> UPDATED
 FILE: src/api.py
+<<<<<<< ORIGINAL (line 5)
+    result = process(payload)
+=======
     result = validate_input(payload)
+>>>>>>> UPDATED
 @@DIFF_END@@
 """
 
 MULTI_HUNK_DIFF = """\
 @@DIFF_START@@
 FILE: src/auth.py
+<<<<<<< ORIGINAL (line 5)
+import os
+=======
 import hashlib
 import hmac
+>>>>>>> UPDATED
+<<<<<<< ORIGINAL (line 20)
+    return hash(password)
+=======
     return hmac.new(key, password, hashlib.sha256).hexdigest()
+>>>>>>> UPDATED
 @@DIFF_END@@
 """
 
@@ -57,8 +80,8 @@ class TestParse:
 
         hunk = result.file_patches[0].hunks[0]
         assert hunk.line_number == 15
-        assert len(hunk.original_lines) == 3
-        assert len(hunk.replacement_lines) == 7
+        assert len(hunk.original_lines) == 3   # 3 original lines to replace
+        assert len(hunk.replacement_lines) == 7  # 7 new replacement lines
         assert hunk.is_insertion is False
         assert hunk.is_deletion is False
 
@@ -77,6 +100,7 @@ class TestParse:
         result = parser.parse(MULTI_HUNK_DIFF)
 
         assert result is not None
+        assert result.parse_successful is True
         assert len(result.file_patches) == 1
         assert len(result.file_patches[0].hunks) == 2
         assert result.file_patches[0].hunks[0].line_number == 5
@@ -104,12 +128,18 @@ class TestParse:
         diff = """\
 @@DIFF_START@@
 FILE: src/auth.py
+<<<<<<< ORIGINAL (line 10)
+    old_code()
+    deprecated_call()
+=======
+>>>>>>> UPDATED
 @@DIFF_END@@
 """
         parser = DiffParser()
         result = parser.parse(diff)
 
         assert result is not None
+        assert result.parse_successful is True
         hunk = result.file_patches[0].hunks[0]
         assert hunk.is_deletion is True
         assert len(hunk.original_lines) == 2

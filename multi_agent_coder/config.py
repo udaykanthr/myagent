@@ -58,6 +58,10 @@ _DEFAULTS = {
     "editing_validate_syntax": True,
     "editing_track_metrics": True,
     "editing_fallback_on_syntax_error": True,
+    "editing_chunk_mode": True,
+    "editing_slim_context": True,
+    "editing_reviewer_diff_mode": True,
+    "editing_max_chunk_files": 3,
     "pricing": {
         "gpt-4o": {"input": 2.50, "output": 10.00},
         "gpt-4o-mini": {"input": 0.15, "output": 0.60},
@@ -326,6 +330,26 @@ class Config:
             editing_section.get("fallback_on_syntax_error",
                                 _DEFAULTS["editing_fallback_on_syntax_error"]),
         )
+        self.EDITING_CHUNK_MODE = _get_bool(
+            "EDITING_CHUNK_MODE", "editing_chunk_mode",
+            editing_section.get("chunk_mode",
+                                _DEFAULTS["editing_chunk_mode"]),
+        )
+        self.EDITING_SLIM_CONTEXT = _get_bool(
+            "EDITING_SLIM_CONTEXT", "editing_slim_context",
+            editing_section.get("slim_context",
+                                _DEFAULTS["editing_slim_context"]),
+        )
+        self.EDITING_REVIEWER_DIFF_MODE = _get_bool(
+            "EDITING_REVIEWER_DIFF_MODE", "editing_reviewer_diff_mode",
+            editing_section.get("reviewer_diff_mode",
+                                _DEFAULTS["editing_reviewer_diff_mode"]),
+        )
+        self.EDITING_MAX_CHUNK_FILES = int(
+            os.getenv("EDITING_MAX_CHUNK_FILES")
+            or editing_section.get("max_chunk_files",
+                                   _DEFAULTS["editing_max_chunk_files"])
+        )
 
         # Plugins
         self.PLUGINS: list[str] = yd.get("plugins", _DEFAULTS["plugins"])
@@ -391,6 +415,10 @@ class Config:
                 "validate_syntax_after_patch": self.EDITING_VALIDATE_SYNTAX,
                 "track_metrics": self.EDITING_TRACK_METRICS,
                 "fallback_on_syntax_error": self.EDITING_FALLBACK_ON_SYNTAX_ERROR,
+                "chunk_mode": self.EDITING_CHUNK_MODE,
+                "slim_context": self.EDITING_SLIM_CONTEXT,
+                "reviewer_diff_mode": self.EDITING_REVIEWER_DIFF_MODE,
+                "max_chunk_files": self.EDITING_MAX_CHUNK_FILES,
             },
         }
 

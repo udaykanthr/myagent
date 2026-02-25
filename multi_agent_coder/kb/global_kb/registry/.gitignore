@@ -1,0 +1,3 @@
+# Registry content is pulled at runtime; do not commit.
+*
+!.gitignore

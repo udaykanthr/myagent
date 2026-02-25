@@ -8,7 +8,9 @@
       "Bash(python -m multi_agent_coder:*)",
       "Bash(pip index:*)",
       "Bash(pip install:*)",
-      "Bash(python -m py_compile:*)"
+      "Bash(python -m py_compile:*)",
+      "Bash(ls:*)",
+      "Bash(cd:*)"
     ]
   }
 }

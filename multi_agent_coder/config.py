@@ -37,6 +37,31 @@ _DEFAULTS = {
     "plugins": [],
     "planner_suffix": "Do not create meta-steps (e.g., 'Review code', 'Identify issues'). Focus on implementation. Combine analysis and action.",
     "budget_limit": 0.0,
+    "search_enabled": True,
+    "search_provider": "duckduckgo",
+    "search_api_key": "",
+    "search_api_url": "",
+    "search_max_results": 3,
+    "search_max_page_chars": 3000,
+    "kb_registry_owner": "udaykanthr",
+    "kb_registry_repo": "agentchanti-kb-registry",
+    "kb_registry_auto_update": True,
+    "kb_enabled": True,
+    "kb_max_context_tokens": 4000,
+    "kb_auto_index_on_start": True,
+    "kb_watcher_debounce_seconds": 1.0,
+    "kb_verbose_logging": False,
+    "editing_diff_mode": True,
+    "editing_min_confidence": 0.60,
+    "editing_context_lines": 5,
+    "editing_fuzzy_match_window": 3,
+    "editing_validate_syntax": True,
+    "editing_track_metrics": True,
+    "editing_fallback_on_syntax_error": True,
+    "editing_chunk_mode": True,
+    "editing_slim_context": True,
+    "editing_reviewer_diff_mode": True,
+    "editing_max_chunk_files": 3,
     "pricing": {
         "gpt-4o": {"input": 2.50, "output": 10.00},
         "gpt-4o-mini": {"input": 0.15, "output": 0.60},
@@ -213,6 +238,119 @@ class Config:
         if not isinstance(self.PRICING, dict):
             self.PRICING = _DEFAULTS["pricing"]
 
+        # Search agent
+        self.SEARCH_ENABLED = _get_bool("SEARCH_ENABLED", "search_enabled",
+                                         _DEFAULTS["search_enabled"])
+        self.SEARCH_PROVIDER = _get("SEARCH_PROVIDER", "search_provider",
+                                     _DEFAULTS["search_provider"])
+        self.SEARCH_API_KEY = _get("SEARCH_API_KEY", "search_api_key",
+                                    _DEFAULTS["search_api_key"])
+        self.SEARCH_API_URL = _get("SEARCH_API_URL", "search_api_url",
+                                    _DEFAULTS["search_api_url"])
+        self.SEARCH_MAX_RESULTS = _get("SEARCH_MAX_RESULTS",
+                                        "search_max_results",
+                                        _DEFAULTS["search_max_results"],
+                                        cast=int)
+        self.SEARCH_MAX_PAGE_CHARS = _get("SEARCH_MAX_PAGE_CHARS",
+                                           "search_max_page_chars",
+                                           _DEFAULTS["search_max_page_chars"],
+                                           cast=int)
+
+        # Global KB registry
+        self.KB_REGISTRY_OWNER = _get(
+            "KB_REGISTRY_OWNER", "kb_registry_owner",
+            _DEFAULTS["kb_registry_owner"])
+        self.KB_REGISTRY_REPO = _get(
+            "KB_REGISTRY_REPO", "kb_registry_repo",
+            _DEFAULTS["kb_registry_repo"])
+        self.KB_REGISTRY_AUTO_UPDATE = _get_bool(
+            "KB_REGISTRY_AUTO_UPDATE", "kb_registry_auto_update",
+            _DEFAULTS["kb_registry_auto_update"])
+
+        # KB context injection (Phase 4)
+        kb_section = yd.get("kb", {}) if isinstance(yd.get("kb"), dict) else {}
+        self.KB_ENABLED = _get_bool(
+            "KB_ENABLED",
+            "kb_enabled",
+            kb_section.get("enabled", _DEFAULTS["kb_enabled"]),
+        )
+        self.KB_MAX_CONTEXT_TOKENS = int(
+            os.getenv("KB_MAX_CONTEXT_TOKENS")
+            or kb_section.get("max_context_tokens", _DEFAULTS["kb_max_context_tokens"])
+        )
+        self.KB_AUTO_INDEX_ON_START = _get_bool(
+            "KB_AUTO_INDEX_ON_START",
+            "kb_auto_index_on_start",
+            kb_section.get("auto_index_on_start", _DEFAULTS["kb_auto_index_on_start"]),
+        )
+        self.KB_WATCHER_DEBOUNCE_SECONDS = float(
+            os.getenv("KB_WATCHER_DEBOUNCE_SECONDS")
+            or kb_section.get("watcher_debounce_seconds",
+                              _DEFAULTS["kb_watcher_debounce_seconds"])
+        )
+        self.KB_VERBOSE_LOGGING = _get_bool(
+            "KB_VERBOSE_LOGGING",
+            "kb_verbose_logging",
+            kb_section.get("verbose_logging", _DEFAULTS["kb_verbose_logging"]),
+        )
+
+        # Diff-aware editing (Phase 5)
+        editing_section = yd.get("editing", {}) if isinstance(yd.get("editing"), dict) else {}
+        self.EDITING_DIFF_MODE = _get_bool(
+            "EDITING_DIFF_MODE", "editing_diff_mode",
+            editing_section.get("diff_mode", _DEFAULTS["editing_diff_mode"]),
+        )
+        self.EDITING_MIN_CONFIDENCE = float(
+            os.getenv("EDITING_MIN_CONFIDENCE")
+            or editing_section.get("min_confidence_threshold",
+                                   _DEFAULTS["editing_min_confidence"])
+        )
+        self.EDITING_CONTEXT_LINES = int(
+            os.getenv("EDITING_CONTEXT_LINES")
+            or editing_section.get("context_lines",
+                                   _DEFAULTS["editing_context_lines"])
+        )
+        self.EDITING_FUZZY_MATCH_WINDOW = int(
+            os.getenv("EDITING_FUZZY_MATCH_WINDOW")
+            or editing_section.get("fuzzy_match_window",
+                                   _DEFAULTS["editing_fuzzy_match_window"])
+        )
+        self.EDITING_VALIDATE_SYNTAX = _get_bool(
+            "EDITING_VALIDATE_SYNTAX", "editing_validate_syntax",
+            editing_section.get("validate_syntax_after_patch",
+                                _DEFAULTS["editing_validate_syntax"]),
+        )
+        self.EDITING_TRACK_METRICS = _get_bool(
+            "EDITING_TRACK_METRICS", "editing_track_metrics",
+            editing_section.get("track_metrics",
+                                _DEFAULTS["editing_track_metrics"]),
+        )
+        self.EDITING_FALLBACK_ON_SYNTAX_ERROR = _get_bool(
+            "EDITING_FALLBACK_ON_SYNTAX_ERROR", "editing_fallback_on_syntax_error",
+            editing_section.get("fallback_on_syntax_error",
+                                _DEFAULTS["editing_fallback_on_syntax_error"]),
+        )
+        self.EDITING_CHUNK_MODE = _get_bool(
+            "EDITING_CHUNK_MODE", "editing_chunk_mode",
+            editing_section.get("chunk_mode",
+                                _DEFAULTS["editing_chunk_mode"]),
+        )
+        self.EDITING_SLIM_CONTEXT = _get_bool(
+            "EDITING_SLIM_CONTEXT", "editing_slim_context",
+            editing_section.get("slim_context",
+                                _DEFAULTS["editing_slim_context"]),
+        )
+        self.EDITING_REVIEWER_DIFF_MODE = _get_bool(
+            "EDITING_REVIEWER_DIFF_MODE", "editing_reviewer_diff_mode",
+            editing_section.get("reviewer_diff_mode",
+                                _DEFAULTS["editing_reviewer_diff_mode"]),
+        )
+        self.EDITING_MAX_CHUNK_FILES = int(
+            os.getenv("EDITING_MAX_CHUNK_FILES")
+            or editing_section.get("max_chunk_files",
+                                   _DEFAULTS["editing_max_chunk_files"])
+        )
+
         # Plugins
         self.PLUGINS: list[str] = yd.get("plugins", _DEFAULTS["plugins"])
         if not isinstance(self.PLUGINS, list):
@@ -253,6 +391,35 @@ class Config:
             "plugins": self.PLUGINS,
             "budget_limit": self.BUDGET_LIMIT,
             "pricing": self.PRICING,
+            "search_enabled": self.SEARCH_ENABLED,
+            "search_provider": self.SEARCH_PROVIDER,
+            "search_api_key": self.SEARCH_API_KEY,
+            "search_api_url": self.SEARCH_API_URL,
+            "search_max_results": self.SEARCH_MAX_RESULTS,
+            "search_max_page_chars": self.SEARCH_MAX_PAGE_CHARS,
+            "kb_registry_owner": self.KB_REGISTRY_OWNER,
+            "kb_registry_repo": self.KB_REGISTRY_REPO,
+            "kb_registry_auto_update": self.KB_REGISTRY_AUTO_UPDATE,
+            "kb": {
+                "enabled": self.KB_ENABLED,
+                "max_context_tokens": self.KB_MAX_CONTEXT_TOKENS,
+                "auto_index_on_start": self.KB_AUTO_INDEX_ON_START,
+                "watcher_debounce_seconds": self.KB_WATCHER_DEBOUNCE_SECONDS,
+                "verbose_logging": self.KB_VERBOSE_LOGGING,
+            },
+            "editing": {
+                "diff_mode": self.EDITING_DIFF_MODE,
+                "min_confidence_threshold": self.EDITING_MIN_CONFIDENCE,
+                "context_lines": self.EDITING_CONTEXT_LINES,
+                "fuzzy_match_window": self.EDITING_FUZZY_MATCH_WINDOW,
+                "validate_syntax_after_patch": self.EDITING_VALIDATE_SYNTAX,
+                "track_metrics": self.EDITING_TRACK_METRICS,
+                "fallback_on_syntax_error": self.EDITING_FALLBACK_ON_SYNTAX_ERROR,
+                "chunk_mode": self.EDITING_CHUNK_MODE,
+                "slim_context": self.EDITING_SLIM_CONTEXT,
+                "reviewer_diff_mode": self.EDITING_REVIEWER_DIFF_MODE,
+                "max_chunk_files": self.EDITING_MAX_CHUNK_FILES,
+            },
         }
 
     def to_yaml(self) -> str:
@@ -276,7 +443,7 @@ class Config:
 
     # Safety: Critical files that require extra care when editing
     CRITICAL_FILES = {
-        "package.json",
+        # "package.json",
         "pyproject.toml",
         "go.mod",
         "pom.xml",

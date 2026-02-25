@@ -2,6 +2,7 @@
 Pipeline execution — wave-based parallel/sequential step execution.
 """
 
+import logging
 import re
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -15,6 +16,8 @@ from .step_handlers import (
     MAX_STEP_RETRIES,
 )
 from .diagnosis import _diagnose_failure, _apply_fix
+
+_logger = logging.getLogger(__name__)
 
 
 MAX_DIAGNOSIS_RETRIES = 2   # outer retries: diagnose failure → fix → re-run step
@@ -146,13 +149,61 @@ def _execute_step(step_idx: int, step_text: str, *,
                   llm_client, executor, coder, reviewer, tester,
                   task: str, memory: FileMemory, display: CLIDisplay,
                   language: str | None, cfg=None,
-                  auto: bool = False) -> tuple[int, bool, str]:
+                  auto: bool = False,
+                  search_agent=None,
+                  kb_context_builder=None,
+                  code_graph=None,
+                  project_profile=None) -> tuple[int, bool, str]:
     """Execute a single step. Returns ``(step_idx, success, error_info)``.
 
     Catches all exceptions so that a crash inside any handler never
     kills the whole pipeline — the step is marked as failed instead.
     """
     try:
+        # --- Project Orientation + KB Context Injection (Phase 4+) ---
+        #
+        # Project grounding ALWAYS comes first — before KB symbols,
+        # before task description, before everything.  It is the LLM's
+        # "north star" for the entire session.
+
+        context_parts: list[str] = []
+
+        # 1. Project orientation grounding (always first)
+        if project_profile is not None:
+            try:
+                context_parts.append(project_profile.format_for_prompt())
+            except Exception as orient_exc:
+                _logger.warning(
+                    "[KB] Project orientation formatting failed: %s",
+                    orient_exc,
+                )
+
+        # 2. KB context (Phase 4 — symbols, error fixes, patterns)
+        if kb_context_builder is not None:
+            try:
+                from ..kb.context_builder import ContextBuilder
+                kb_ctx = kb_context_builder.build_context(
+                    task_description=step_text,
+                    current_file=None,
+                    max_tokens=getattr(cfg, "KB_MAX_CONTEXT_TOKENS", 4000) if cfg else 4000,
+                )
+                if kb_ctx.kb_available or kb_ctx.behavioral_instructions:
+                    kb_text = kb_context_builder.format_context_for_prompt(kb_ctx)
+                    if kb_text:
+                        context_parts.append(kb_text)
+                _logger.debug(
+                    "[KB] Injected context: %d tokens, sources: %s, "
+                    "symbols: %d, errors: %d",
+                    kb_ctx.token_count, kb_ctx.sources_used,
+                    len(kb_ctx.local_symbols), len(kb_ctx.error_fixes),
+                )
+            except Exception as kb_exc:
+                _logger.warning("[KB] Context injection failed: %s", kb_exc)
+
+        # Combine and store in memory for downstream handlers
+        if context_parts:
+            memory._kb_context = "\n\n".join(context_parts)
+
         log.info(f"\n{'='*60}\nTask {step_idx+1}: {step_text}\n"
                  f"Memory: {memory.summary()}\n{'='*60}")
 
@@ -175,17 +226,22 @@ def _execute_step(step_idx: int, step_text: str, *,
             display.complete_step(step_idx, "done" if success else "failed")
 
         elif step_type == "CODE":
+            # Extract code graph from kb_context_builder if available
+            _graph = code_graph
+            if _graph is None and kb_context_builder is not None:
+                _graph = getattr(kb_context_builder, "_graph", None)
             success, error_info = _handle_code_step(
                 step_text, coder, reviewer, executor,
                 task, memory, display, step_idx, language=language, cfg=cfg,
-                auto=auto)
+                auto=auto, code_graph=_graph,
+                project_profile=project_profile)
             display.complete_step(step_idx, "done" if success else "failed")
 
         elif step_type == "TEST":
             success, error_info = _handle_test_step(
                 step_text, tester, coder, reviewer, executor,
                 task, memory, display, step_idx, language=language,
-                auto=auto)
+                auto=auto, search_agent=search_agent)
             display.complete_step(step_idx, "done" if success else "failed")
 
         else:
@@ -205,7 +261,10 @@ def _run_diagnosis_loop(step_idx: int, step_text: str, error_info: str, *,
                         llm_client, executor, coder, reviewer, tester,
                         task: str, memory: FileMemory, display: CLIDisplay,
                         language: str | None, cfg=None,
-                        auto: bool = False) -> bool:
+                        auto: bool = False,
+                        search_agent=None,
+                        kb_context_builder=None,
+                        project_profile=None) -> bool:
     """Run diagnose → fix → retry loop. Returns ``True`` if the step was fixed.
 
     All exceptions are caught so that a crash during diagnosis (e.g. an
@@ -251,7 +310,8 @@ def _run_diagnosis_loop(step_idx: int, step_text: str, error_info: str, *,
             step_type = display.steps[step_idx].get("type", "CODE")
             diagnosis = _diagnose_failure(
                 step_text, step_type, error_info,
-                memory, llm_client, display, step_idx)
+                memory, llm_client, display, step_idx,
+                search_agent=search_agent, language=language)
 
             fix_applied, cmds_succeeded = _apply_fix(
                 diagnosis, executor, memory, display, step_idx,
@@ -280,6 +340,9 @@ def _run_diagnosis_loop(step_idx: int, step_text: str, error_info: str, *,
                 coder=coder, reviewer=reviewer, tester=tester,
                 task=task, memory=memory, display=display,
                 language=language, cfg=cfg, auto=auto,
+                search_agent=search_agent,
+                kb_context_builder=kb_context_builder,
+                project_profile=project_profile,
             )
 
             if success:

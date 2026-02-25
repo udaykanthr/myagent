@@ -3,6 +3,7 @@ CLI entry point — argument parsing and main execution flow.
 """
 
 import argparse
+import sys
 
 from ..config import Config
 from ..llm.ollama import OllamaClient
@@ -34,6 +35,13 @@ from .pipeline import build_step_waves, _execute_step, _run_diagnosis_loop
 
 
 def main():
+    # Dispatch `agentchanti kb ...` to the KB CLI before argparse sees it,
+    # so the KB subcommand tree is fully independent of the main task args.
+    if len(sys.argv) > 1 and sys.argv[1] == "kb":
+        from ..kb.cli import kb_main
+        kb_main(sys.argv[2:])
+        return
+
     parser = argparse.ArgumentParser(description="AgentChanti — Multi-Agent Local Coder")
     parser.add_argument("task", nargs="?", help="The coding task to perform")
     parser.add_argument("--prompt-from-file", help="Read prompt from a text file")
@@ -74,6 +82,10 @@ def main():
                          help="Disable HTML report generation")
     parser.add_argument("--generate-config", "--generate-yaml", action="store_true",
                          help="Generate a .agentchanti.yaml file with current settings and exit")
+    parser.add_argument("--no-search", action="store_true",
+                         help="Disable web search agent for planning and error diagnosis")
+    parser.add_argument("--no-kb", action="store_true",
+                         help="Disable KB context injection (debugging)")
     args = parser.parse_args()
 
     # ── 0. Load config ──
@@ -221,6 +233,47 @@ def main():
         plugin_registry.discover(cfg.PLUGINS)
         log.info(f"Plugins loaded: {plugin_registry.size}")
 
+    # ── 4f. Init search agent ──
+    search_agent = None
+    if cfg.SEARCH_ENABLED and not args.no_search:
+        from ..agents.search import SearchAgent
+        search_agent = SearchAgent(
+            provider=cfg.SEARCH_PROVIDER,
+            api_key=cfg.SEARCH_API_KEY,
+            api_url=cfg.SEARCH_API_URL,
+            max_results=cfg.SEARCH_MAX_RESULTS,
+            max_page_chars=cfg.SEARCH_MAX_PAGE_CHARS,
+        )
+        log.info(f"Search agent enabled (provider: {cfg.SEARCH_PROVIDER})")
+    else:
+        log.info("Search agent disabled")
+
+    # ── 4g. Init KB context builder and runtime watcher (Phase 4) ──
+    kb_context_builder = None
+    kb_runtime_watcher = None
+    if cfg.KB_ENABLED and not args.no_kb:
+        try:
+            import os as _os
+            from ..kb.startup import KBStartupManager
+            from ..kb.context_builder import ContextBuilder
+            from ..kb.runtime_watcher import RuntimeWatcher
+
+            # Smart startup check — handles Qdrant, global KB, local KB
+            KBStartupManager().run(project_root=_os.getcwd())
+
+            kb_context_builder = ContextBuilder(project_root=_os.getcwd())
+            kb_runtime_watcher = RuntimeWatcher(
+                debounce_seconds=cfg.KB_WATCHER_DEBOUNCE_SECONDS,
+            )
+            kb_runtime_watcher.start(project_root=_os.getcwd())
+            log.info("[KB] Context builder and runtime watcher initialised")
+        except Exception as kb_exc:
+            log.warning(f"[KB] Initialisation failed (non-fatal): {kb_exc}")
+            kb_context_builder = None
+            kb_runtime_watcher = None
+    else:
+        log.info("[KB] KB context injection disabled")
+
     # ── 4e. Step reports (for HTML report) ──
     step_reports: list[StepReport] = []
 
@@ -354,6 +407,17 @@ def main():
         plan = None
         raw_steps = None
 
+        # Search for latest documentation to enrich planner context
+        if search_agent:
+            display.show_status("Searching web for latest documentation...")
+            search_context = search_agent.search_for_task(
+                args.task, language=language)
+            if search_context:
+                planner_context += f"\n\n{search_context}"
+                log.info("[Planning] Injected web search context into planner")
+            else:
+                log.info("[Planning] No web search context found")
+
         for plan_attempt in range(1, MAX_PLAN_RETRIES + 1):
             display.show_status(
                 f"Requesting steps from planner...{f' (retry {plan_attempt})' if plan_attempt > 1 else ''}"
@@ -451,6 +515,8 @@ def main():
                 coder=coder, reviewer=reviewer, tester=tester,
                 task=args.task, memory=memory, display=display,
                 language=language, cfg=cfg, auto=args.auto,
+                search_agent=search_agent,
+                kb_context_builder=kb_context_builder,
             )
 
             if success:
@@ -471,6 +537,8 @@ def main():
                     coder=coder, reviewer=reviewer, tester=tester,
                     task=args.task, memory=memory, display=display,
                     language=language, cfg=cfg, auto=args.auto,
+                    search_agent=search_agent,
+                    kb_context_builder=kb_context_builder,
                 )
                 if fixed:
                     step_results[idx] = "done"
@@ -499,6 +567,8 @@ def main():
                         coder=coder, reviewer=reviewer, tester=tester,
                         task=args.task, memory=memory, display=display,
                         language=language, cfg=cfg, auto=args.auto,
+                        search_agent=search_agent,
+                        kb_context_builder=kb_context_builder,
                     )
                     futures[f] = idx
 
@@ -531,6 +601,8 @@ def main():
                     coder=coder, reviewer=reviewer, tester=tester,
                     task=args.task, memory=memory, display=display,
                     language=language, cfg=cfg, auto=args.auto,
+                    search_agent=search_agent,
+                    kb_context_builder=kb_context_builder,
                 )
                 if fixed:
                     step_results[idx] = "done"
@@ -644,6 +716,11 @@ def main():
                 print(f"  {'Committed!' if ok else 'Commit failed: ' + msg}")
 
     # ── 15. Cleanup ──
+    if kb_runtime_watcher is not None:
+        try:
+            kb_runtime_watcher.stop()
+        except Exception:
+            pass
     executor.cleanup()
 
 

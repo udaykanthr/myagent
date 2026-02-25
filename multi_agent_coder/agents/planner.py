@@ -72,6 +72,14 @@ Write a numbered list. Each step MUST be a single, concrete action:
     - `npm init -y`
     - `ng new myapp --defaults`
 
+11. **Sub-project paths**: When a step creates a new project in a subdirectory
+    (e.g. `npx create-react-app my-app`, `npx create-next-app my-app --yes`),
+    ALL subsequent steps MUST reference files with the subdirectory prefix.
+    - CORRECT: "Create dashboard page in `my-app/src/pages/Dashboard.js`"
+    - WRONG: "Create dashboard page in `src/pages/Dashboard.js`"
+    - CMD steps that operate on the sub-project must include `cd my-app &&`
+      before the command (e.g. `cd my-app && npm install axios`)
+
 ═══════ QUALITY CHECKLIST (verify before outputting) ═══════
 - [ ] Every file path in the plan matches an existing project file OR is
       clearly marked as a new file to create

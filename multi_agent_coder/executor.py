@@ -500,8 +500,107 @@ class Executor:
         )
         return any(re.search(p, cmd) for p in patterns)
 
+    # ── Unix → Windows command translation ──
+
+    @staticmethod
+    def _rewrite_unix_cmd_for_windows(cmd: str) -> str:
+        """Rewrite common Unix/bash commands to Windows cmd.exe equivalents.
+
+        LLMs frequently generate Unix-style shell commands regardless of the
+        host OS.  This translates the most common ones so they work under
+        ``cmd.exe`` on Windows.  Compound commands chained with ``&&`` or
+        ``||`` are split, each segment is rewritten, and reassembled.
+        """
+        segments = re.split(r'(\s*&&\s*|\s*\|\|\s*)', cmd)
+        rewritten = False
+        result = []
+
+        for seg in segments:
+            if re.match(r'\s*(?:&&|\|\|)\s*$', seg):
+                result.append(seg)
+                continue
+            original = seg.strip()
+            new_seg = Executor._rewrite_single_unix_cmd(original)
+            if new_seg != original:
+                rewritten = True
+                result.append(new_seg)
+            else:
+                result.append(seg)
+
+        if rewritten:
+            final = ''.join(result)
+            log.info(f"[Executor] Rewrote Unix → Windows: {cmd!r}")
+            return final
+        return cmd
+
+    @staticmethod
+    def _rewrite_single_unix_cmd(cmd: str) -> str:
+        """Translate a single Unix command to its Windows cmd.exe equivalent."""
+
+        # mkdir -p dir1 dir2 → mkdir "dir1" 2>nul & mkdir "dir2" 2>nul
+        m = re.match(r'^mkdir\s+-p\s+(.+)', cmd)
+        if m:
+            dirs = m.group(1).strip().split()
+            return '; '.join(f'mkdir "{d}" 2>$nul' for d in dirs if d)
+
+        # touch file1 file2 → create empty files
+        m = re.match(r'^touch\s+(.+)', cmd)
+        if m:
+            files = m.group(1).strip().split()
+            return ' & '.join(f'copy nul "{f}" >$nul 2>&1' for f in files if f)
+
+        # rm [-rf] target(s) → rmdir /s /q or del /f /q
+        m = re.match(r'^rm\s+((?:-\S+\s+)*)(.+)', cmd)
+        if m:
+            flag_str, targets_str = m.group(1), m.group(2).strip()
+            flags = set()
+            for tok in flag_str.split():
+                if tok.startswith('-'):
+                    flags.update(tok[1:])
+            targets = targets_str.split()
+            if 'r' in flags or 'R' in flags:
+                return ' & '.join(
+                    f'(rmdir /s /q "{t}" 2>$nul & del /f /q "{t}" 2>$nul)'
+                    for t in targets if t
+                )
+            elif flags:
+                return ' & '.join(
+                    f'del /f /q "{t}" 2>$nul' for t in targets if t
+                )
+            else:
+                return ' & '.join(
+                    f'del /q "{t}" 2>$nul' for t in targets if t
+                )
+
+        # cp -r src dst → xcopy /E /I /Y "src" "dst"
+        m = re.match(r'^cp\s+-[rR]\s+(\S+)\s+(\S+)$', cmd)
+        if m:
+            return f'xcopy /E /I /Y "{m.group(1)}" "{m.group(2)}"'
+
+        # mv src dst → move /Y "src" "dst"
+        m = re.match(r'^mv\s+(\S+)\s+(\S+)$', cmd)
+        if m:
+            return f'move /Y "{m.group(1)}" "{m.group(2)}"'
+
+        # chmod → no-op on Windows
+        if re.match(r'^chmod\s+', cmd):
+            return 'echo chmod skipped >nul'
+
+        # export VAR=value → set VAR=value
+        m = re.match(r'^export\s+(\w+)=(.*)', cmd)
+        if m:
+            return f'set "{m.group(1)}={m.group(2)}"'
+
+        # which binary → where binary
+        m = re.match(r'^which\s+(\S+)$', cmd)
+        if m:
+            return f'where "{m.group(1)}" 2>nul'
+
+        return cmd
+
     def run_command(self, cmd: str, env: dict | None = None,
-                    timeout: int = 120, background: bool = False) -> Tuple[bool, str]:
+                    timeout: int = 120, background: bool = False,
+                    cwd: str | None = None) -> Tuple[bool, str]:
         """
         Runs an arbitrary shell command. Returns (success, output).
         On Windows, auto-wraps PowerShell cmdlets so they don't fail
@@ -509,9 +608,17 @@ class Executor:
 
         If *background* is True, the process is started and tracked. The 
         method waits briefly (3s) to see if it crashes; if not, it returns success.
+
+        If *cwd* is set, the command runs in that directory instead of the
+        current working directory.
         """
         try:
-            log.info(f"[Executor] Running {'background ' if background else ''}command: {cmd}")
+            log.info(f"[Executor] Running {'background ' if background else ''}command: {cmd}"
+                     f"{f' (cwd={cwd})' if cwd else ''}")
+            # Translate Unix commands to Windows cmd.exe equivalents
+            if os.name == 'nt':
+                cmd = Executor._rewrite_unix_cmd_for_windows(cmd)
+
             if os.name == 'nt' and Executor._needs_powershell(cmd):
                 # Escape double quotes inside the command for PowerShell
                 escaped = cmd.replace('"', '\\"')
@@ -539,6 +646,7 @@ class Executor:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 env=run_env,
+                cwd=cwd,
             )
 
             if background:
@@ -625,7 +733,7 @@ class Executor:
         except (UnicodeDecodeError, ValueError, LookupError):
             return raw.decode("ascii", errors="replace")
 
-    def run_tests(self, test_command: str = "pytest") -> Tuple[bool, str]:
+    def run_tests(self, test_command: str = "pytest", cwd: str | None = None) -> Tuple[bool, str]:
         """Run tests with the project root on PYTHONPATH.
 
         This ensures imports like ``from src.my_module import X`` resolve
@@ -635,9 +743,10 @@ class Executor:
         message instead of a silent failure.
         """
         env = os.environ.copy()
-        cwd = os.getcwd()
+        # Ensure PYTHONPATH always includes the base dir, even if running in a subdir
+        base_dir = os.getcwd()
         existing = env.get("PYTHONPATH", "")
-        env["PYTHONPATH"] = cwd + (os.pathsep + existing if existing else "")
+        env["PYTHONPATH"] = base_dir + (os.pathsep + existing if existing else "")
 
         # Quick check: does the test runner binary exist?
         runner = test_command.split()[0]  # e.g. "pytest", "npx", "go"
@@ -655,9 +764,22 @@ class Executor:
             log.warning(f"[Executor] {msg}")
             return False, msg
 
-        return self.run_command(test_command, env=env)
+        return self.run_command(test_command, env=env, cwd=cwd)
 
     # ── Missing-package auto-install ──
+
+    # JS/TS: globals that need explicit import in ESM projects
+    _JS_GLOBAL_TO_IMPORT: dict[str, str] = {
+        "expect": "@jest/globals",
+        "describe": "@jest/globals",
+        "test": "@jest/globals",
+        "it": "@jest/globals",
+        "beforeEach": "@jest/globals",
+        "afterEach": "@jest/globals",
+        "beforeAll": "@jest/globals",
+        "afterAll": "@jest/globals",
+        "jest": "@jest/globals",
+    }
 
     # Well-known module → pip-package mappings where the names differ
     _MODULE_TO_PACKAGE = {
@@ -693,12 +815,13 @@ class Executor:
 
     @staticmethod
     def detect_missing_packages(test_output: str) -> List[str]:
-        """Parse test output and return a list of pip packages to install.
+        """Parse test output and return a list of packages to install.
 
         Detects:
         - ``ModuleNotFoundError: No module named 'xyz'``
         - ``ImportError: No module named 'xyz'``
         - ``fixture 'xyz' not found`` (pytest plugin fixtures)
+        - ``ReferenceError: X is not defined`` (JS/TS missing globals)
         """
         packages: list[str] = []
         seen: set[str] = set()
@@ -722,15 +845,26 @@ class Executor:
                 packages.append(pkg)
                 seen.add(pkg)
 
+        # JS/TS: ReferenceError for missing globals (expect, describe, etc.)
+        for m in re.finditer(
+            r"ReferenceError:\s*(\w+)\s+is not defined",
+            test_output,
+        ):
+            name = m.group(1)
+            pkg = Executor._JS_GLOBAL_TO_IMPORT.get(name)
+            if pkg and pkg not in seen:
+                packages.append(pkg)
+                seen.add(pkg)
+
         return packages
 
-    def install_packages(self, packages: List[str]) -> Tuple[bool, str]:
-        """Install packages via pip. Returns (all_succeeded, combined_output)."""
+    def install_packages(self, packages: List[str], tool: str = "pip install", cwd: str | None = None) -> Tuple[bool, str]:
+        """Install packages via the specified tool (default: `pip install`). Returns (all_succeeded, combined_output)."""
         if not packages:
             return True, ""
-        cmd = f"pip install {' '.join(packages)}"
+        cmd = f"{tool} {' '.join(packages)}"
         log.info(f"[Executor] Auto-installing: {cmd}")
-        return self.run_command(cmd)
+        return self.run_command(cmd, cwd=cwd)
 
     @staticmethod
     def parse_step_dependencies(steps: List[str]) -> Tuple[List[str], Dict[int, set]]:

@@ -17,8 +17,11 @@ Example usage::
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
+
+_logger = logging.getLogger(__name__)
 
 from .config import Config
 from .llm.ollama import OllamaClient
@@ -60,6 +63,7 @@ def run_task(
     language: str | None = None,
     no_embeddings: bool = False,
     no_git: bool = True,
+    no_kb: bool = False,
     auto: bool = True,
     config_path: str | None = None,
     working_dir: str | None = None,
@@ -74,6 +78,7 @@ def run_task(
         language: Programming language override (auto-detected if None).
         no_embeddings: Disable semantic embeddings.
         no_git: Disable git integration (default True for library use).
+        no_kb: Disable KB context injection.
         auto: Non-interactive mode (default True for library use).
         config_path: Explicit path to ``.agentchanti.yaml``.
         working_dir: Working directory for the task (default: CWD).
@@ -91,7 +96,7 @@ def run_task(
         return _run_task_impl(
             task, provider=provider, model=model, embed_model=embed_model,
             language=language, no_embeddings=no_embeddings,
-            no_git=no_git, auto=auto, config_path=config_path,
+            no_git=no_git, no_kb=no_kb, auto=auto, config_path=config_path,
         )
     finally:
         os.chdir(original_dir)
@@ -100,8 +105,8 @@ def run_task(
 def _run_task_impl(
     task: str, *, provider: str, model: str | None,
     embed_model: str | None, language: str | None,
-    no_embeddings: bool, no_git: bool, auto: bool,
-    config_path: str | None,
+    no_embeddings: bool, no_git: bool, no_kb: bool,
+    auto: bool, config_path: str | None,
 ) -> TaskResult:
     """Internal implementation of run_task."""
 
@@ -184,6 +189,67 @@ def _run_task_impl(
     display = CLIDisplay(task)
     memory = FileMemory(embedding_store=embed_store, top_k=cfg.EMBEDDING_TOP_K)
 
+    # Search agent
+    search_agent = None
+    if cfg.SEARCH_ENABLED:
+        from .agents.search import SearchAgent
+        search_agent = SearchAgent(
+            provider=cfg.SEARCH_PROVIDER,
+            api_key=cfg.SEARCH_API_KEY,
+            api_url=cfg.SEARCH_API_URL,
+            max_results=cfg.SEARCH_MAX_RESULTS,
+            max_page_chars=cfg.SEARCH_MAX_PAGE_CHARS,
+        )
+
+    # KB context builder and runtime watcher (Phase 4)
+    kb_context_builder = None
+    kb_runtime_watcher = None
+    if cfg.KB_ENABLED and not no_kb:
+        try:
+            from .kb.startup import KBStartupManager
+            from .kb.context_builder import ContextBuilder
+            from .kb.runtime_watcher import RuntimeWatcher
+
+            # Smart startup check — handles Qdrant, global KB, local KB
+            KBStartupManager().run(project_root=os.getcwd())
+
+            kb_context_builder = ContextBuilder(project_root=os.getcwd())
+            kb_runtime_watcher = RuntimeWatcher(
+                debounce_seconds=cfg.KB_WATCHER_DEBOUNCE_SECONDS,
+            )
+            kb_runtime_watcher.start(project_root=os.getcwd())
+            _logger.info("[KB] Context builder and runtime watcher initialised")
+        except Exception as kb_exc:
+            _logger.warning("[KB] Initialisation failed (non-fatal): %s", kb_exc)
+            kb_context_builder = None
+            kb_runtime_watcher = None
+
+    # Project orientation — detect project DNA for LLM grounding
+    project_profile = None
+    try:
+        from .kb.project_orientation import ProjectOrientation
+
+        kb_graph = None
+        if kb_context_builder is not None:
+            kb_graph = getattr(kb_context_builder, "_graph", None)
+
+        orientation = ProjectOrientation(
+            graph=kb_graph,
+            project_root=os.getcwd(),
+        )
+        project_profile = orientation.get_profile()
+        _logger.info(
+            "[KB] Project detected: %s / %s | source: %s | tests: %s",
+            project_profile.language,
+            project_profile.framework or "no framework",
+            project_profile.source_root,
+            ", ".join(project_profile.test_frameworks) or "unknown",
+        )
+    except Exception as orient_exc:
+        _logger.warning(
+            "[KB] Project orientation failed (non-fatal): %s", orient_exc,
+        )
+
     # Pre-load existing source files into memory
     if source_files:
         memory.update(source_files)
@@ -213,6 +279,8 @@ def _run_task_impl(
                 coder=coder, reviewer=reviewer, tester=tester,
                 task=task, memory=memory, display=display,
                 language=language, auto=auto,
+                kb_context_builder=kb_context_builder,
+                project_profile=project_profile,
             )
 
             if success:
@@ -225,7 +293,10 @@ def _run_task_impl(
                     llm_client=llm_client, executor=executor,
                     coder=coder, reviewer=reviewer, tester=tester,
                     task=task, memory=memory, display=display,
-                    language=language, auto=auto,
+                    language=language,
+                    search_agent=search_agent,
+                    kb_context_builder=kb_context_builder,
+                    project_profile=project_profile,
                 )
                 if fixed:
                     step_results[idx] = "done"
@@ -235,6 +306,13 @@ def _run_task_impl(
 
         if not pipeline_success:
             break
+
+    # Stop KB runtime watcher
+    if kb_runtime_watcher is not None:
+        try:
+            kb_runtime_watcher.stop()
+        except Exception:
+            pass
 
     if pipeline_success:
         clear_checkpoint(checkpoint_file)

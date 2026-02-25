@@ -2,6 +2,7 @@
 Language detection and test framework mapping for multi-language support.
 """
 
+import json
 import os
 from collections import Counter
 
@@ -59,6 +60,18 @@ TEST_FRAMEWORKS = {
             "Use relative paths from the test file to the source file."
         ),
     },
+    "javascript:vitest": {
+        "command": "npx vitest run",
+        "dir": "__tests__",
+        "ext": ".js",
+        "prefix": "",
+        "suffix": ".test",
+        "setup_cmd": "npm install --save-dev vitest",
+        "config_note": (
+            "Vitest is the test runner. Use `import { describe, it, expect } from 'vitest';` "
+            "in every test file. Use ES `import` syntax for all imports."
+        ),
+    },
     "typescript": {
         "command": "npx jest --forceExit --watchAll=false",
         "dir": "__tests__",
@@ -70,6 +83,19 @@ TEST_FRAMEWORKS = {
             "TypeScript projects need ts-jest or @swc/jest configured. "
             "Ensure jest.config has `transform` set for .ts files. "
             "Use `import/export` syntax in test files."
+        ),
+    },
+    "typescript:vitest": {
+        "command": "npx vitest run",
+        "dir": "__tests__",
+        "ext": ".ts",
+        "prefix": "",
+        "suffix": ".test",
+        "setup_cmd": "npm install --save-dev vitest",
+        "config_note": (
+            "Vitest is the test runner. Use `import { describe, it, expect } from 'vitest';` "
+            "in every test file. Use ES `import` syntax for all imports. "
+            "For React components (.tsx), use @testing-library/react."
         ),
     },
     "go": {
@@ -192,8 +218,14 @@ def detect_language_from_task(task: str) -> str | None:
     return None
 
 
-def get_test_framework(language: str) -> dict:
-    """Return test framework config for *language*, defaulting to pytest."""
+def get_test_framework(language: str, test_runner: str | None = None) -> dict:
+    """Return test framework config for *language*, defaulting to pytest.
+
+    When *test_runner* is ``"vitest"`` and the language is JS or TS, returns
+    the Vitest-specific framework config instead of Jest.
+    """
+    if test_runner == "vitest" and language in ("javascript", "typescript"):
+        return TEST_FRAMEWORKS[f"{language}:vitest"]
     return TEST_FRAMEWORKS.get(language, TEST_FRAMEWORKS["python"])
 
 
@@ -205,3 +237,59 @@ def get_language_name(language: str) -> str:
 def get_code_block_lang(language: str) -> str:
     """Markdown fence language tag for a language key."""
     return _CODE_BLOCK_LANGS.get(language, language)
+
+
+def detect_language_from_files(file_paths: list[str]) -> str | None:
+    """Infer the project language from a list of file paths.
+
+    Typically called with paths extracted from ``#### [FILE]:`` markers in
+    context strings.  Returns ``None`` when no recognised extensions are found.
+    """
+    ext_counts: Counter = Counter()
+    for path in file_paths:
+        _, ext = os.path.splitext(path)
+        lang = EXTENSION_MAP.get(ext)
+        if lang:
+            ext_counts[lang] += 1
+    if not ext_counts:
+        return None
+    return ext_counts.most_common(1)[0][0]
+
+
+def detect_test_runner(directory: str | None = None) -> str | None:
+    """Detect whether a JS/TS project uses Vitest or Jest.
+
+    Checks for ``vitest.config.*`` files first, then ``jest.config.*`` files,
+    then falls back to inspecting ``package.json`` devDependencies.
+
+    Returns ``"vitest"``, ``"jest"``, or ``None``.
+    """
+    cwd = directory or "."
+
+    # Check for vitest config files
+    for name in ("vitest.config.ts", "vitest.config.js", "vitest.config.mts",
+                 "vitest.config.mjs"):
+        if os.path.isfile(os.path.join(cwd, name)):
+            return "vitest"
+
+    # Check for jest config files
+    for name in ("jest.config.js", "jest.config.ts", "jest.config.mjs",
+                 "jest.config.cjs", "jest.config.json"):
+        if os.path.isfile(os.path.join(cwd, name)):
+            return "jest"
+
+    # Fall back to package.json devDependencies
+    pkg_path = os.path.join(cwd, "package.json")
+    if os.path.isfile(pkg_path):
+        try:
+            with open(pkg_path, "r", encoding="utf-8") as f:
+                pkg = json.load(f)
+            dev_deps = pkg.get("devDependencies", {})
+            if "vitest" in dev_deps:
+                return "vitest"
+            if "jest" in dev_deps:
+                return "jest"
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    return None

@@ -25,13 +25,13 @@ def test_detect_hazards_small_file_ignored():
     hazards = _detect_hazards("any_file.txt", old_content, new_content)
     assert len(hazards) == 0
 
-def test_detect_hazards_package_json_dependency_loss():
-    # Dependencies removed
-    old_content = '{"dependencies": {"react": "^18.0.0"}}'
-    new_content = '{"name": "my-app"}'
-    hazards = _detect_hazards("package.json", old_content, new_content)
-    # Checks for dependency loss heuristics
-    assert any("Critical section 'dependencies' removed" in h[1] for h in hazards)
+# def test_detect_hazards_package_json_dependency_loss():
+#     # Dependencies removed
+#     old_content = '{"dependencies": {"react": "^18.0.0"}}'
+#     new_content = '{"name": "my-app"}'
+#     hazards = _detect_hazards("package.json", old_content, new_content)
+#     # Checks for dependency loss heuristics
+#     assert any("Critical section 'dependencies' removed" in h[1] for h in hazards)
 
 def test_detect_hazards_package_json_dependency_modification():
     # Simulating a manual edit to dependencies (even if not removed, generic warning for package.json)

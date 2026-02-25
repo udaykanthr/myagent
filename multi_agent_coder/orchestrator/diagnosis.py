@@ -9,16 +9,33 @@ from ..cli_display import CLIDisplay, token_tracker, log
 from ..diff_display import show_diffs, _detect_hazards
 
 from .memory import FileMemory
-from .step_handlers import _shell_instructions
+from .step_handlers import _shell_instructions, _strip_protected_files, _detect_subproject_root
 from .classification import _extract_commands_from_text, _looks_like_command
 
 
 def _diagnose_failure(step_text: str, step_type: str, error_info: str,
                       memory: FileMemory, llm_client, display: CLIDisplay,
-                      step_idx: int) -> str:
+                      step_idx: int,
+                      search_agent=None,
+                      language: str | None = None) -> str:
     display.step_info(step_idx, "Analyzing failure root cause...")
 
+    # ── Optional: search the web for error documentation ────
+    search_context = ""
+    if search_agent is not None:
+        display.step_info(step_idx, "Searching web for error documentation...")
+        try:
+            search_context = search_agent.search_for_error(
+                error_info, step_text, language=language)
+            if search_context:
+                log.info(f"Step {step_idx+1}: Search agent found documentation")
+        except Exception as exc:
+            log.warning(f"Step {step_idx+1}: Search agent error: {exc}")
+
     context_files = memory.related_context(step_text)
+
+    # Detect sub-project root to inform the LLM
+    subproject = _detect_subproject_root(memory)
 
     prior_context = ""
     all_files = memory.all_files()
@@ -36,6 +53,19 @@ def _diagnose_failure(step_text: str, step_type: str, error_info: str,
         f"Step type: {step_type}\n\n"
         f"Error details:\n{error_info}\n\n"
     )
+    if subproject:
+        prompt += (
+            f"IMPORTANT: The project source code lives in the '{subproject}/' "
+            f"subdirectory. All commands (npm install, pip install, test "
+            f"commands, etc.) must target that directory, NOT the repository "
+            f"root. File paths should include the '{subproject}/' prefix.\n\n"
+        )
+    if search_context:
+        prompt += (
+            "The following web search results may contain relevant documentation,\n"
+            "error explanations, or solutions. Use them to inform your fix:\n\n"
+            f"{search_context}\n\n"
+        )
     if prior_context:
         prompt += f"{prior_context}\n"
     if context_files:
@@ -123,6 +153,10 @@ def _apply_fix(diagnosis: str, executor: Executor, memory: FileMemory,
                          f"fuzzy parser extracted: {list(files.keys())}")
 
         if files:
+            # Strip protected manifest files before any further processing
+            files = _strip_protected_files(files)
+
+        if files:
             # Filter out files with hazardous diffs (e.g. truncation,
             # dependency removal) — these would corrupt the project.
             safe_files: dict[str, str] = {}
@@ -174,10 +208,40 @@ def _apply_fix(diagnosis: str, executor: Executor, memory: FileMemory,
         if fix_commands:
             log.info(f"Step {step_idx+1}: Fuzzy command parser found: {fix_commands}")
 
+    # Detect sub-project root so fix commands like `npm install` run in
+    # the correct directory instead of the repo root.
+    import re as _re_fix
+    subproject = _detect_subproject_root(memory)
+    _subproject_cmd_patterns = (
+        r'\bnpm\s+(install|start|run|test|build|ci)\b',
+        r'\bnpx\s+',
+        r'\byarn\s+(install|add|start|dev|build|test)\b',
+        r'\bpnpm\s+(install|add|start|dev|build|test)\b',
+        r'\bnode\s+',
+        r'\bng\s+(serve|build|test)\b',
+        r'\bpip\s+install\b',
+        r'\bpytest\b',
+    )
+
     for cmd in fix_commands:
-        display.step_info(step_idx, f"Running fix: {cmd}")
-        log.info(f"Step {step_idx+1}: Running fix command: {cmd}")
-        success, output = executor.run_command(cmd)
+        # Determine if this command should run in the sub-project directory
+        fix_cwd = None
+        if subproject:
+            needs_subproject = any(
+                _re_fix.search(p, cmd, _re_fix.IGNORECASE)
+                for p in _subproject_cmd_patterns
+            )
+            already_has_cd = (f'cd {subproject}' in cmd
+                              or f'cd ./{subproject}' in cmd)
+            if needs_subproject and not already_has_cd:
+                fix_cwd = subproject
+                log.info(f"Step {step_idx+1}: Running fix command in "
+                         f"sub-project: {subproject}/")
+
+        cwd_note = f" (in {fix_cwd}/)" if fix_cwd else ""
+        display.step_info(step_idx, f"Running fix: {cmd}{cwd_note}")
+        log.info(f"Step {step_idx+1}: Running fix command: {cmd}{cwd_note}")
+        success, output = executor.run_command(cmd, cwd=fix_cwd)
         if output:
             truncated = output[:4000] if len(output) > 4000 else output
             memory.update({

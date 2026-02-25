@@ -4,6 +4,7 @@ Step handlers — CMD, CODE, and TEST step execution logic.
 # Separate retry limit for test generation (lower than code to avoid pipeline halts)
 MAX_TEST_GEN_RETRIES = 2
 
+import json
 import os
 import shutil
 
@@ -13,7 +14,10 @@ from ..agents.reviewer import ReviewerAgent
 from ..agents.tester import TesterAgent
 from ..executor import Executor
 from ..cli_display import CLIDisplay, token_tracker, log
-from ..language import get_code_block_lang, get_test_framework
+from ..language import (
+    get_code_block_lang, get_test_framework, detect_test_runner,
+    detect_language_from_files,
+)
 
 from .memory import FileMemory
 from .classification import _extract_command_from_step
@@ -46,7 +50,376 @@ def _get_runner_install_cmd(runner: str) -> str | None:
     return _RUNNER_INSTALL.get(runner, f"pip install {runner}")
 
 
+def _read_js_project_env(cwd: str | None = None) -> dict:
+    """Read package.json and project config to detect JS/TS environment.
+
+    Returns a dict with:
+        is_esm: bool       — True if package.json has "type": "module"
+        has_jest: bool      — True if jest in dependencies/devDependencies
+        has_jest_globals: bool — True if @jest/globals is installed
+        has_jest_config: bool — True if jest.config.* exists
+        module_type: str    — "module" or "commonjs"
+        test_runner: str    — "vitest", "jest", or "jest" (default)
+        has_vitest: bool    — True if vitest in devDependencies
+        has_vitest_config: bool — True if vitest.config.* exists
+        has_tsx: bool       — True if .tsx files exist in project
+    """
+    env = {
+        "is_esm": False,
+        "has_jest": False,
+        "has_jest_globals": False,
+        "has_jest_config": False,
+        "module_type": "commonjs",
+        "test_runner": "jest",
+        "has_vitest": False,
+        "has_vitest_config": False,
+        "has_tsx": False,
+    }
+
+    # Read package.json
+    pkg_path = os.path.join(cwd, "package.json") if cwd else "package.json"
+    if os.path.isfile(pkg_path):
+        try:
+            with open(pkg_path, "r", encoding="utf-8") as f:
+                pkg = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return env
+
+        # ESM detection
+        if pkg.get("type") == "module":
+            env["is_esm"] = True
+            env["module_type"] = "module"
+
+        # Dependency detection
+        all_deps = {}
+        all_deps.update(pkg.get("dependencies", {}))
+        all_deps.update(pkg.get("devDependencies", {}))
+        env["has_jest"] = "jest" in all_deps
+        env["has_jest_globals"] = "@jest/globals" in all_deps
+        env["has_vitest"] = "vitest" in all_deps
+
+    # Vitest config detection
+    for config_name in ("vitest.config.ts", "vitest.config.js",
+                        "vitest.config.mts", "vitest.config.mjs"):
+        cfg_path = os.path.join(cwd, config_name) if cwd else config_name
+        if os.path.isfile(cfg_path):
+            env["has_vitest_config"] = True
+            break
+
+    # Jest config detection
+    for config_name in ("jest.config.js", "jest.config.ts", "jest.config.mjs",
+                        "jest.config.cjs", "jest.config.json"):
+        cfg_path = os.path.join(cwd, config_name) if cwd else config_name
+        if os.path.isfile(cfg_path):
+            env["has_jest_config"] = True
+            break
+
+    # Determine test runner: prefer Vitest if detected
+    if env["has_vitest_config"] or env["has_vitest"]:
+        env["test_runner"] = "vitest"
+    elif env["has_jest_config"] or env["has_jest"]:
+        env["test_runner"] = "jest"
+
+    # Check for .tsx files (useful for React testing guidance)
+    scan_dir = cwd or "."
+    if os.path.isdir(os.path.join(scan_dir, "src")):
+        for root, _dirs, files in os.walk(os.path.join(scan_dir, "src")):
+            if any(f.endswith(".tsx") for f in files):
+                env["has_tsx"] = True
+                break
+
+    return env
+
+
 import platform
+
+
+def _strip_protected_files(files: dict[str, str]) -> dict[str, str]:
+    """Handle protected manifest files from parsed LLM output.
+
+    For lock files (package-lock.json, yarn.lock, etc.) — fully blocked.
+    For mergeable manifests (package.json, requirements.txt, etc.) — attempts
+    smart merge: new dependencies/scripts are merged in, removals and version
+    changes are blocked.  Falls back to full block on parse errors.
+
+    Files are only protected when they already exist on disk (new projects
+    need to create them initially).
+    """
+    if not files:
+        return files
+
+    # Lock files that should NEVER be touched — only package managers write these
+    _LOCK_FILES: set[str] = {
+        'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml',
+        'go.sum', 'Cargo.lock', 'Gemfile.lock',
+        'composer.lock', 'Pipfile.lock', 'poetry.lock',
+        'Pipfile',  # managed by pipenv
+    }
+
+    # Manifests that support smart merge (additive deps only)
+    _MERGEABLE_JSON: set[str] = {
+        'package.json', 'composer.json',
+    }
+    _MERGEABLE_TEXT: set[str] = {
+        'requirements.txt',
+    }
+    _MERGEABLE_TOML: set[str] = {
+        'Cargo.toml',
+    }
+    _MERGEABLE_RUBY: set[str] = {
+        'Gemfile',
+    }
+    _MERGEABLE_GO: set[str] = {
+        'go.mod',
+    }
+
+    filtered: dict[str, str] = {}
+    merged_count = 0
+    stripped_count = 0
+
+    for fpath, content in files.items():
+        basename = os.path.basename(fpath)
+
+        # Not a protected file — pass through
+        if basename not in Executor._PROTECTED_FILENAMES:
+            filtered[fpath] = content
+            continue
+
+        # File doesn't exist on disk yet — allow creation
+        if not os.path.isfile(fpath):
+            filtered[fpath] = content
+            continue
+
+        # Lock files — always block
+        if basename in _LOCK_FILES:
+            log.warning(f"[Pipeline] Blocked lock file: {fpath} "
+                        f"(only package managers should modify this)")
+            stripped_count += 1
+            continue
+
+        # Read existing file content
+        try:
+            with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+                existing_content = f.read()
+        except OSError:
+            log.warning(f"[Pipeline] Cannot read {fpath}, blocking write")
+            stripped_count += 1
+            continue
+
+        # Attempt smart merge based on file type
+        merged = None
+        if basename in _MERGEABLE_JSON:
+            merged = _smart_merge_json_manifest(existing_content, content, fpath)
+        elif basename in _MERGEABLE_TEXT:
+            merged = _smart_merge_requirements_txt(existing_content, content, fpath)
+        elif basename in _MERGEABLE_GO:
+            merged = _smart_merge_go_mod(existing_content, content, fpath)
+        elif basename in _MERGEABLE_TOML:
+            merged = _smart_merge_line_based(existing_content, content, fpath)
+        elif basename in _MERGEABLE_RUBY:
+            merged = _smart_merge_line_based(existing_content, content, fpath)
+
+        if merged is not None and merged != existing_content:
+            filtered[fpath] = merged
+            merged_count += 1
+            log.info(f"[Pipeline] Smart-merged additive changes into {fpath}")
+        elif merged == existing_content:
+            log.info(f"[Pipeline] No new additions for {fpath}, skipping write")
+            stripped_count += 1
+        else:
+            log.warning(f"[Pipeline] Smart merge failed for {fpath}, "
+                        f"blocking write (fallback)")
+            stripped_count += 1
+
+    if merged_count > 0:
+        log.info(f"[Pipeline] Smart-merged {merged_count} protected file(s)")
+    if stripped_count > 0:
+        log.info(f"[Pipeline] Blocked {stripped_count} protected file(s)")
+    return filtered
+
+
+def _smart_merge_json_manifest(existing: str, llm_output: str,
+                                filepath: str) -> str | None:
+    """Merge additive changes from LLM output into an existing JSON manifest.
+
+    Merges new keys in ``dependencies``, ``devDependencies``, and ``scripts``.
+    Blocks removals and version changes.  Returns merged JSON string, or
+    ``None`` on parse failure.
+    """
+    try:
+        old_data = json.loads(existing)
+        new_data = json.loads(llm_output)
+    except (json.JSONDecodeError, TypeError):
+        log.warning(f"[SmartMerge] JSON parse failed for {filepath}")
+        return None
+
+    if not isinstance(old_data, dict) or not isinstance(new_data, dict):
+        return None
+
+    changed = False
+    # Sections where we allow additive merges
+    merge_sections = ['dependencies', 'devDependencies', 'scripts',
+                      'peerDependencies', 'optionalDependencies']
+
+    for section in merge_sections:
+        old_section = old_data.get(section, {})
+        new_section = new_data.get(section, {})
+        if not isinstance(old_section, dict) or not isinstance(new_section, dict):
+            continue
+
+        for key, value in new_section.items():
+            if key not in old_section:
+                # New key — merge it in
+                if section not in old_data:
+                    old_data[section] = {}
+                old_data[section][key] = value
+                changed = True
+                log.info(f"[SmartMerge] Added {section}.{key} = {value!r} "
+                         f"to {filepath}")
+            elif old_section[key] != value:
+                # Changed value — block, keep original
+                log.info(f"[SmartMerge] Blocked change to {section}.{key} "
+                         f"in {filepath}: {old_section[key]!r} → {value!r}")
+
+        # Check for removals — log but don't apply
+        for key in old_section:
+            if key not in new_section:
+                log.info(f"[SmartMerge] Blocked removal of {section}.{key} "
+                         f"from {filepath}")
+
+    if not changed:
+        return existing
+
+    # Preserve original formatting indent
+    indent = 2  # default
+    for line in existing.splitlines()[1:5]:
+        stripped = line.lstrip()
+        if stripped:
+            indent = len(line) - len(stripped)
+            break
+
+    return json.dumps(old_data, indent=indent, ensure_ascii=False) + "\n"
+
+
+def _smart_merge_requirements_txt(existing: str, llm_output: str,
+                                   filepath: str) -> str | None:
+    """Merge new packages from LLM output into existing requirements.txt.
+
+    Appends packages that don't exist yet.  Blocks removals and version
+    changes.  Returns merged content string.
+    """
+    import re
+
+    def _parse_req_name(line: str) -> str | None:
+        """Extract package name from a requirements.txt line."""
+        line = line.strip()
+        if not line or line.startswith('#') or line.startswith('-'):
+            return None
+        # Handle: package==1.0, package>=1.0, package~=1.0, package[extra]
+        m = re.match(r'^([A-Za-z0-9_][A-Za-z0-9._-]*)', line)
+        return m.group(1).lower() if m else None
+
+    existing_lines = existing.splitlines()
+    new_lines = llm_output.splitlines()
+
+    # Build map of existing packages: name → full line
+    existing_pkgs: dict[str, str] = {}
+    for line in existing_lines:
+        name = _parse_req_name(line)
+        if name:
+            existing_pkgs[name] = line.strip()
+
+    # Find new packages to add
+    additions: list[str] = []
+    for line in new_lines:
+        name = _parse_req_name(line)
+        if name is None:
+            continue
+        if name not in existing_pkgs:
+            additions.append(line.strip())
+            log.info(f"[SmartMerge] Adding new package: {line.strip()} "
+                     f"to {filepath}")
+        elif existing_pkgs[name] != line.strip():
+            log.info(f"[SmartMerge] Blocked version change for {name} "
+                     f"in {filepath}: {existing_pkgs[name]} → {line.strip()}")
+
+    if not additions:
+        return existing
+
+    # Append new packages at the end
+    result = existing.rstrip('\n')
+    result += '\n' + '\n'.join(additions) + '\n'
+    return result
+
+
+def _smart_merge_go_mod(existing: str, llm_output: str,
+                         filepath: str) -> str | None:
+    """Merge new require directives from LLM output into existing go.mod.
+
+    Only adds new ``require`` lines that don't exist yet.
+    """
+    import re
+
+    def _parse_requires(content: str) -> dict[str, str]:
+        """Extract module → version from require directives."""
+        reqs: dict[str, str] = {}
+        # Single-line: require module/path v1.2.3
+        for m in re.finditer(r'^\s*require\s+(\S+)\s+(\S+)', content, re.MULTILINE):
+            reqs[m.group(1)] = m.group(2)
+        # Block: require ( ... )
+        for block in re.finditer(r'require\s*\((.*?)\)', content, re.DOTALL):
+            for line in block.group(1).splitlines():
+                line = line.strip()
+                if line and not line.startswith('//'):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        reqs[parts[0]] = parts[1]
+        return reqs
+
+    existing_reqs = _parse_requires(existing)
+    new_reqs = _parse_requires(llm_output)
+
+    additions: list[str] = []
+    for mod, ver in new_reqs.items():
+        if mod not in existing_reqs:
+            additions.append(f"\trequire {mod} {ver}")
+            log.info(f"[SmartMerge] Adding require {mod} {ver} to {filepath}")
+
+    if not additions:
+        return existing
+
+    result = existing.rstrip('\n')
+    result += '\n' + '\n'.join(additions) + '\n'
+    return result
+
+
+def _smart_merge_line_based(existing: str, llm_output: str,
+                             filepath: str) -> str | None:
+    """Generic line-based merge for Cargo.toml, Gemfile, etc.
+
+    Appends lines from LLM output that don't exist (case-sensitive) in
+    the existing file.  This is a conservative catch-all for formats
+    we don't deeply parse.
+    """
+    existing_lines_set = set(existing.splitlines())
+
+    additions: list[str] = []
+    for line in llm_output.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith('#'):
+            continue
+        if line not in existing_lines_set and stripped not in {
+            l.strip() for l in existing_lines_set
+        }:
+            additions.append(line)
+
+    if not additions:
+        return existing
+
+    log.info(f"[SmartMerge] Appending {len(additions)} new line(s) to {filepath}")
+    result = existing.rstrip('\n')
+    result += '\n' + '\n'.join(additions) + '\n'
+    return result
 
 
 def _shell_instructions() -> str:
@@ -131,6 +504,96 @@ def _build_prior_steps_context(memory: FileMemory, step_idx: int) -> str:
     return "Previously executed steps:\n" + "\n\n".join(parts) + "\n\n"
 
 
+def _detect_subproject_root(memory: FileMemory) -> str | None:
+    """Detect if all project files share a common subdirectory prefix.
+
+    When an earlier CMD step created a project in a subdirectory (e.g.
+    ``npx create-react-app my-app``), subsequent files in memory will all
+    live under ``my-app/``.  This function finds that common root.
+
+    Returns the subdirectory name (e.g. ``my-app``) or ``None``.
+    """
+    all_files = memory.all_files()
+    # Only consider real source files, not internal tracking paths.
+    # Internal paths use underscore-prefixed directories (_cmd_output/,
+    # _fix_output/, etc.) and must be excluded from sub-project detection.
+    source_paths = [
+        p for p in all_files
+        if not p.startswith('_') and '/' in p
+    ]
+    if not source_paths:
+        return None
+
+    # Extract first path component from each file
+    first_components: set[str] = set()
+    for p in source_paths:
+        parts = p.replace('\\', '/').split('/')
+        if len(parts) >= 2:  # must have at least dir/file
+            first_components.add(parts[0])
+
+    # If all files share the same single first directory component,
+    # that's our sub-project root
+    if len(first_components) == 1:
+        subproject = first_components.pop()
+        # Sanity check: the directory should exist on disk
+        if os.path.isdir(subproject):
+            log.info(f"[SubProject] Detected sub-project root: {subproject}/")
+            return subproject
+
+    # Fallback 1: if memory contains files from multiple top-level directories
+    # (e.g. search provider added files), look for a known project manifest
+    from ..executor import Executor
+    manifest_dirs = set()
+    for p in source_paths:
+        if os.path.basename(p) in Executor._PROTECTED_FILENAMES:
+            dirname = os.path.dirname(p)
+            if dirname:  # Must be a subdirectory
+                manifest_dirs.add(dirname)
+
+    if len(manifest_dirs) == 1:
+        subproject = manifest_dirs.pop()
+        if os.path.isdir(subproject):
+            log.info(f"[SubProject] Detected sub-project root via manifest in memory: {subproject}/")
+            return subproject
+
+    # Fallback 2: scan immediate subdirectories on disk for project manifests.
+    # Protected files (package.json, etc.) are often NOT in memory because
+    # _strip_protected_files blocks them.  Check the filesystem directly.
+    # Only consider directories that memory files reference.
+    candidate_dirs = first_components if first_components else set()
+    for candidate in candidate_dirs:
+        if not os.path.isdir(candidate):
+            continue
+        for manifest in ('package.json', 'requirements.txt', 'go.mod',
+                         'Cargo.toml', 'Gemfile', 'pyproject.toml',
+                         'composer.json'):
+            if os.path.isfile(os.path.join(candidate, manifest)):
+                log.info(f"[SubProject] Detected sub-project root via "
+                         f"disk manifest ({manifest}): {candidate}/")
+                return candidate
+
+    # Fallback 3: if memory has files under a common prefix but the primary
+    # check failed (e.g. multiple first-components), pick the directory that
+    # contains the majority of files.
+    if len(first_components) > 1:
+        from collections import Counter
+        counts = Counter(
+            p.replace('\\', '/').split('/')[0]
+            for p in source_paths
+            if len(p.replace('\\', '/').split('/')) >= 2
+        )
+        if counts:
+            best, best_count = counts.most_common(1)[0]
+            total = sum(counts.values())
+            # Only use majority if it covers >70% of files
+            if best_count > total * 0.7 and os.path.isdir(best):
+                log.info(f"[SubProject] Detected sub-project root via "
+                         f"majority ({best_count}/{total} files): {best}/")
+                return best
+
+    return None
+
+
 def _handle_cmd_step(step_text: str, executor: Executor,
                      llm_client, memory: FileMemory,
                      display: CLIDisplay, step_idx: int,
@@ -182,6 +645,32 @@ def _handle_cmd_step(step_text: str, executor: Executor,
             log.warning(f"Step {step_idx+1}: LLM returned empty command.")
             return True, ""
 
+    # Detect sub-project root so commands like `npm install` run in the
+    # correct directory instead of the repo root.
+    subproject_cwd = None
+    subproject = _detect_subproject_root(memory)
+    if subproject:
+        import re as _re_sp
+        # Commands that should run inside the sub-project directory
+        _subproject_cmd_patterns = (
+            r'\bnpm\s+(install|start|run|test|build|ci)\b',
+            r'\bnpx\s+',
+            r'\byarn\s+(install|add|start|dev|build|test)\b',
+            r'\bpnpm\s+(install|add|start|dev|build|test)\b',
+            r'\bnode\s+',
+            r'\bng\s+(serve|build|test)\b',
+        )
+        needs_subproject = any(
+            _re_sp.search(p, cmd, _re_sp.IGNORECASE)
+            for p in _subproject_cmd_patterns
+        )
+        # Don't set cwd if the command already includes a `cd` to the subproject
+        already_has_cd = f'cd {subproject}' in cmd or f'cd ./{subproject}' in cmd
+        if needs_subproject and not already_has_cd:
+            subproject_cwd = subproject
+            log.info(f"Step {step_idx+1}: Running command in sub-project: "
+                     f"{subproject}/")
+
     # Detect if this should be a background command (e.g. starting a server).
     # Must be specific — broad keywords like "npm" or "run" cause false
     # positives that make install/build commands return before completing.
@@ -203,14 +692,16 @@ def _handle_cmd_step(step_text: str, executor: Executor,
     )
     is_background = any(_re.search(p, cmd, _re.IGNORECASE) for p in _bg_cmd_patterns)
     
+    cwd_note = f" (in {subproject_cwd}/)" if subproject_cwd else ""
     if is_background:
-        display.step_info(step_idx, f"Running background: {cmd}")
+        display.step_info(step_idx, f"Running background: {cmd}{cwd_note}")
         log.info(f"Step {step_idx+1}: Running background command: {cmd}")
     else:
-        display.step_info(step_idx, f"Running: {cmd}")
+        display.step_info(step_idx, f"Running: {cmd}{cwd_note}")
         log.info(f"Step {step_idx+1}: Running command: {cmd}")
 
-    success, output = executor.run_command(cmd, background=is_background)
+    success, output = executor.run_command(
+        cmd, background=is_background, cwd=subproject_cwd)
     log.info(f"Step {step_idx+1}: Command output:\n{output}")
 
     if output:
@@ -321,17 +812,63 @@ def _handle_code_step(step_text: str, coder: CoderAgent, reviewer: ReviewerAgent
                       display: CLIDisplay, step_idx: int,
                       language: str | None = None,
                       cfg: Config | None = None,
-                      auto: bool = False) -> tuple[bool, str]:
+                      auto: bool = False,
+                      code_graph=None,
+                      project_profile=None) -> tuple[bool, str]:
+    # --- Tier 1: Diff-aware editing (requires KB graph + high confidence) ---
+    if cfg and getattr(cfg, "EDITING_DIFF_MODE", False) and code_graph is not None:
+        diff_result = _try_diff_edit(
+            step_text=step_text, coder=coder, task=task,
+            memory=memory, display=display, step_idx=step_idx,
+            language=language, cfg=cfg, code_graph=code_graph,
+            project_profile=project_profile,
+        )
+        if diff_result is not None:
+            return diff_result
+
+    # --- Tier 2: Chunk edit (regex-based, no KB graph needed) ---
+    if cfg and getattr(cfg, "EDITING_CHUNK_MODE", True):
+        chunk_result = _try_chunk_edit(
+            step_text=step_text, coder=coder, reviewer=reviewer,
+            executor=executor, task=task, memory=memory,
+            display=display, step_idx=step_idx,
+            language=language, cfg=cfg, auto=auto,
+            project_profile=project_profile,
+        )
+        if chunk_result is not None:
+            return chunk_result
+
+    # --- Tier 3: Full-file flow (fallback) ---
     feedback = ""
     context_window = cfg.CONTEXT_WINDOW if cfg else 8192
     ctx_budget = int(context_window * 0.8)
     prev_files: dict[str, str] = {}  # Track files from previous attempt
 
     for attempt in range(1, MAX_STEP_RETRIES + 1):
-        context = f"Task: {task}"
-        related = memory.related_context(step_text, max_tokens=ctx_budget)
-        if related:
-            context += f"\nExisting files (overwrite as needed):\n{related}"
+        # Prepend project orientation grounding to context
+        context_prefix = ""
+        if project_profile is not None:
+            try:
+                context_prefix = project_profile.format_for_prompt() + "\n\n"
+            except Exception:
+                pass
+
+        context = context_prefix + f"Task: {task}"
+        # Use slim context for non-target files when enabled
+        use_slim = cfg and getattr(cfg, "EDITING_SLIM_CONTEXT", True)
+        targets = _detect_target_files(step_text, memory) if use_slim else []
+        if use_slim and targets:
+            slim = memory.related_context_slim(step_text, max_tokens=ctx_budget)
+            if slim:
+                context += f"\nProject file structures:\n{slim}"
+            for tf in targets:
+                tf_content = memory.get(tf)
+                if tf_content:
+                    context += f"\n\n#### [FILE]: {tf}\n```\n{tf_content}\n```"
+        else:
+            related = memory.related_context(step_text, max_tokens=ctx_budget)
+            if related:
+                context += f"\nExisting files (overwrite as needed):\n{related}"
         if memory.summary() != "(no files yet)":
             context += f"\nAll project files: {memory.summary()}"
         if feedback:
@@ -361,10 +898,20 @@ def _handle_code_step(step_text: str, coder: CoderAgent, reviewer: ReviewerAgent
 
         files = executor.parse_code_blocks(response)
         if not files:
+            files = executor.parse_code_blocks_fuzzy(response)
+        if not files:
             feedback = "No file markers found. Use #### [FILE]: path/to/file.py format."
             display.step_info(step_idx, "No files parsed, retrying...")
             log.warning(f"Step {step_idx+1}: No files parsed from coder response.")
             continue
+
+        # Normalize paths: fix LLM-generated paths that are suffixes of
+        # known project files (e.g. src/App.js → my-app/src/App.js)
+        files = _normalize_fix_paths(files, memory)
+
+        # Strip protected manifest files (package.json, etc.) to prevent
+        # LLM from overwriting them with corrupted versions
+        files = _strip_protected_files(files)
 
         # On retry, merge: keep previously approved files that weren't
         # re-generated, so the coder doesn't need to regenerate everything
@@ -401,11 +948,21 @@ def _handle_code_step(step_text: str, coder: CoderAgent, reviewer: ReviewerAgent
         sent_before = token_tracker.total_prompt_tokens
         recv_before = token_tracker.total_completion_tokens
 
-        review = reviewer.process(
-            f"Review this code for the step: {step_text}\n\n{response}",
-            context=f"Step: {step_text}\nOnly review changes relevant to this step.",
-            language=language,
-        )
+        use_diff_review = cfg and getattr(cfg, "EDITING_REVIEWER_DIFF_MODE", True)
+        if use_diff_review:
+            review_ctx = _build_review_context(files, memory, step_text)
+            review = reviewer.process(
+                f"Review this code change for the step: {step_text}\n\n{review_ctx}",
+                context=f"Step: {step_text}\nReview ONLY the changes shown.",
+                language=language,
+                review_mode="diff",
+            )
+        else:
+            review = reviewer.process(
+                f"Review this code for the step: {step_text}\n\n{response}",
+                context=f"Step: {step_text}\nOnly review changes relevant to this step.",
+                language=language,
+            )
 
         sent_delta = token_tracker.total_prompt_tokens - sent_before
         recv_delta = token_tracker.total_completion_tokens - recv_before
@@ -441,6 +998,7 @@ def _handle_code_step(step_text: str, coder: CoderAgent, reviewer: ReviewerAgent
                 "will fail", "won't work", "does not work", "broken",
                 "incorrect", "wrong", "typeerror", "nameerror",
                 "syntaxerror", "attributeerror", "keyerror",
+                "referenceerror",
             ))
             if not has_critical:
                 display.step_info(step_idx, "Review has only minor suggestions, accepting ✔")
@@ -565,9 +1123,32 @@ def _handle_test_step(step_text: str, tester: TesterAgent, coder: CoderAgent,
                       task: str, memory: FileMemory,
                       display: CLIDisplay, step_idx: int,
                       language: str | None = None,
-                      auto: bool = False) -> tuple[bool, str]:
+                      auto: bool = False,
+                      search_agent=None) -> tuple[bool, str]:
+    # Detect sub-project (if the test targets a nested folder)
+    subproject_cwd = _detect_subproject_root(memory)
+
+    # Infer language from memory file paths when not explicitly provided
+    if language is None:
+        mem_files = list(memory.all_files().keys())
+        if mem_files:
+            language = detect_language_from_files(mem_files)
+            if language:
+                log.info(f"Step {step_idx+1}: Inferred language '{language}' "
+                         f"from memory files")
+
+    # Detect JS/TS project environment for ESM-aware test generation
+    js_env: dict | None = None
+    test_runner: str | None = None
+    if language in ("javascript", "typescript"):
+        js_env = _read_js_project_env(subproject_cwd)
+        test_runner = js_env.get("test_runner")
+        log.info(f"Step {step_idx+1}: JS project env: {js_env}")
+
+    # Use language-aware defaults (fall back to Python only as last resort)
     lang_tag = get_code_block_lang(language) if language else "python"
-    test_cmd = get_test_framework(language)["command"] if language else "pytest"
+    fw = get_test_framework(language, test_runner=test_runner) if language else get_test_framework("python")
+    test_cmd = fw["command"]
 
     # Ensure the test runner binary is installed before attempting to run tests
     parts = test_cmd.split()
@@ -585,12 +1166,43 @@ def _handle_test_step(step_text: str, tester: TesterAgent, coder: CoderAgent,
             return False, msg
         display.step_info(step_idx, f"`{runner}` not found, installing...")
         log.info(f"Step {step_idx+1}: Auto-installing: {install_cmd}")
-        ok, out = executor.run_command(install_cmd)
+        ok, out = executor.run_command(install_cmd, cwd=subproject_cwd)
         if ok:
             display.step_info(step_idx, f"Installed `{actual_tool}`")
         else:
             log.warning(f"Step {step_idx+1}: Failed to install "
                         f"{actual_tool}: {out[:200]}")
+
+    # Auto-setup for Jest-based JS/TS projects (skip when Vitest is the runner)
+    if js_env and test_runner != "vitest":
+        # Auto-setup for ESM projects: install @jest/globals if needed
+        if js_env.get("is_esm") and not js_env.get("has_jest_globals"):
+            display.step_info(step_idx, "ESM project detected, installing @jest/globals...")
+            ok, out = executor.run_command("npm install --save-dev @jest/globals", cwd=subproject_cwd)
+            if ok:
+                js_env["has_jest_globals"] = True
+                display.step_info(step_idx, "Installed @jest/globals")
+            else:
+                log.warning(f"Step {step_idx+1}: Failed to install @jest/globals: {out[:200]}")
+
+        # Create minimal jest.config for ESM if missing
+        if js_env.get("is_esm") and not js_env.get("has_jest_config"):
+            jest_config_content = (
+                "// Auto-generated for ESM compatibility\n"
+                "export default {\n"
+                "  transform: {},\n"
+                "};\n"
+            )
+            config_path = os.path.join(subproject_cwd, "jest.config.js") if subproject_cwd else "jest.config.js"
+            if not os.path.isfile(config_path):
+                try:
+                    with open(config_path, "w", encoding="utf-8") as f:
+                        f.write(jest_config_content)
+                    js_env["has_jest_config"] = True
+                    display.step_info(step_idx, "Created jest.config.js for ESM")
+                    log.info(f"Step {step_idx+1}: Auto-created jest.config.js for ESM")
+                except OSError as e:
+                    log.warning(f"Step {step_idx+1}: Failed to create jest.config.js: {e}")
 
     code_summary = ""
     for fname, content in memory.all_files().items():
@@ -605,11 +1217,22 @@ def _handle_test_step(step_text: str, tester: TesterAgent, coder: CoderAgent,
         gen_context = f"Code:\n{code_summary}"
         if feedback:
             gen_context += f"\nFeedback: {feedback}"
+        # Add JS/TS environment info to context
+        if js_env:
+            env_note = f"\nProject environment: {js_env}"
+            if js_env.get('is_esm') and test_runner != "vitest":
+                env_note += (
+                    "\nCRITICAL: This is an ES Module project. "
+                    "Tests MUST import from '@jest/globals'.\n"
+                )
+            gen_context += env_note
 
         sent_before = token_tracker.total_prompt_tokens
         recv_before = token_tracker.total_completion_tokens
 
-        test_response = tester.process(step_text, context=gen_context, language=language)
+        test_response = tester.process(
+            step_text, context=gen_context, language=language,
+            env_info=js_env)
 
         sent_delta = token_tracker.total_prompt_tokens - sent_before
         recv_delta = token_tracker.total_completion_tokens - recv_before
@@ -626,6 +1249,9 @@ def _handle_test_step(step_text: str, tester: TesterAgent, coder: CoderAgent,
             feedback = "No test files found. Use #### [FILE]: format."
             display.step_info(step_idx, "No test files parsed, retrying...")
             continue
+
+        # Strip protected manifest files before they reach memory
+        test_files = _strip_protected_files(test_files)
 
         # Normalize paths: fix LLM-generated paths that are suffixes of known files
         test_files = _normalize_fix_paths(test_files, memory)
@@ -694,8 +1320,8 @@ def _handle_test_step(step_text: str, tester: TesterAgent, coder: CoderAgent,
         prev_output = None
         for run_attempt in range(1, MAX_STEP_RETRIES + 1):
             display.step_info(step_idx, f"Running: {test_cmd} (attempt {run_attempt})...")
-            log.info(f"Step {step_idx+1}: Running test command: {test_cmd}")
-            success, output = executor.run_tests(test_cmd)
+            log.info(f"Step {step_idx+1}: Running test command: {test_cmd}" + (f" in {subproject_cwd}" if subproject_cwd else ""))
+            success, output = executor.run_tests(test_cmd, cwd=subproject_cwd)
             log.info(f"Step {step_idx+1}: Test run output:\n{output or '(no output)'}")
 
             last_test_output = output
@@ -709,7 +1335,7 @@ def _handle_test_step(step_text: str, tester: TesterAgent, coder: CoderAgent,
             _error_classes = set(_re.findall(
                 r'(ModuleNotFoundError|ImportError|SyntaxError|NameError|'
                 r'TypeError|AttributeError|IndentationError|FileNotFoundError|'
-                r'AssertionError|KeyError|ValueError)',
+                r'AssertionError|KeyError|ValueError|ReferenceError)',
                 output or ""
             ))
 
@@ -718,7 +1344,7 @@ def _handle_test_step(step_text: str, tester: TesterAgent, coder: CoderAgent,
                 prev_error_classes = set(_re.findall(
                     r'(ModuleNotFoundError|ImportError|SyntaxError|NameError|'
                     r'TypeError|AttributeError|IndentationError|FileNotFoundError|'
-                    r'AssertionError|KeyError|ValueError)',
+                    r'AssertionError|KeyError|ValueError|ReferenceError)',
                     prev_output or ""
                 ))
                 if _error_classes and _error_classes == prev_error_classes:
@@ -770,10 +1396,10 @@ def _handle_test_step(step_text: str, tester: TesterAgent, coder: CoderAgent,
                     break
                 display.step_info(step_idx, f"Installing `{actual_tool}`...")
                 log.info(f"Step {step_idx+1}: Installing test runner: {install_cmd}")
-                ok, out = executor.run_command(install_cmd)
+                ok, out = executor.run_command(install_cmd, cwd=subproject_cwd)
                 if ok:
                     display.step_info(step_idx, f"Installed `{actual_tool}`, re-running...")
-                    success, output = executor.run_tests(test_cmd)
+                    success, output = executor.run_tests(test_cmd, cwd=subproject_cwd)
                     last_test_output = output
                     if success:
                         display.step_info(step_idx, "Tests passed after runner install ✔")
@@ -783,13 +1409,15 @@ def _handle_test_step(step_text: str, tester: TesterAgent, coder: CoderAgent,
             # Auto-install missing packages before asking coder to fix
             missing_pkgs = executor.detect_missing_packages(output)
             if missing_pkgs:
+                install_tool = "npm install --save-dev" if language in ("javascript", "typescript") else ("pip install")
+                
                 display.step_info(step_idx, f"Installing missing packages: {', '.join(missing_pkgs)}")
-                log.info(f"Step {step_idx+1}: Auto-installing: {missing_pkgs}")
-                install_ok, install_out = executor.install_packages(missing_pkgs)
+                log.info(f"Step {step_idx+1}: Auto-installing: {missing_pkgs} with {install_tool}")
+                install_ok, install_out = executor.install_packages(missing_pkgs, tool=install_tool, cwd=subproject_cwd)
                 if install_ok:
                     display.step_info(step_idx, "Packages installed, re-running tests...")
                     log.info(f"Step {step_idx+1}: Re-running test command: {test_cmd}")
-                    success, output = executor.run_tests(test_cmd)
+                    success, output = executor.run_tests(test_cmd, cwd=subproject_cwd)
                     log.info(f"Step {step_idx+1}: Test re-run after install:\n{output or '(no output)'}")
                     last_test_output = output
                     if success:
@@ -819,6 +1447,20 @@ def _handle_test_step(step_text: str, tester: TesterAgent, coder: CoderAgent,
             display.step_info(step_idx, "Tests failed, asking coder to fix...")
             error_detail = output[:1000] if output else f"(command `{test_cmd}` produced no output — it may have crashed or the test framework may not be installed)"
 
+            # Search the web for error documentation to help the coder fix
+            search_context = ""
+            if search_agent is not None:
+                display.step_info(step_idx, "Searching web for test error fix...")
+                try:
+                    search_context = search_agent.search_for_error(
+                        error_detail, step_text, language=language)
+                    if search_context:
+                        log.info(f"Step {step_idx+1}: Search agent found "
+                                 f"test error documentation")
+                except Exception as exc:
+                    log.warning(f"Step {step_idx+1}: Search agent error "
+                                f"during test fix: {exc}")
+
             # Build a more specific fix prompt that restricts changes to test files
             test_file_list = ", ".join(test_files.keys())
             fix_context = (
@@ -827,6 +1469,12 @@ def _handle_test_step(step_text: str, tester: TesterAgent, coder: CoderAgent,
                 f"Test files that need fixing: {test_file_list}\n"
                 f"Project files:\n{code_summary}"
             )
+            if search_context:
+                fix_context += (
+                    f"\n\nThe following web search results contain relevant "
+                    f"documentation and solutions for this error. Use them "
+                    f"to inform your fix:\n\n{search_context}"
+                )
             fix_prompt = (
                 "Fix ONLY the test files so tests pass. "
                 "Do NOT modify source files, package.json, or any config files. "
@@ -852,6 +1500,8 @@ def _handle_test_step(step_text: str, tester: TesterAgent, coder: CoderAgent,
             if not fix_files:
                 fix_files = executor.parse_code_blocks_fuzzy(fix_response)
             if fix_files:
+                # Strip protected manifest files
+                fix_files = _strip_protected_files(fix_files)
                 # Normalize paths and filter to test-only files
                 fix_files = _normalize_fix_paths(fix_files, memory)
                 fix_files = _filter_test_only_files(
@@ -872,3 +1522,562 @@ def _handle_test_step(step_text: str, tester: TesterAgent, coder: CoderAgent,
 
     log.error(f"Step {step_idx+1}: Could not generate valid tests after {MAX_TEST_GEN_RETRIES} attempts.")
     return False, f"Could not generate valid tests after {MAX_TEST_GEN_RETRIES} attempts.\nLast feedback:\n{feedback}"
+
+
+# ---------------------------------------------------------------------------
+# Diff-aware editing (Phase 5)
+# ---------------------------------------------------------------------------
+
+def _try_diff_edit(
+    *,
+    step_text: str,
+    coder: CoderAgent,
+    task: str,
+    memory: FileMemory,
+    display: CLIDisplay,
+    step_idx: int,
+    language: str | None,
+    cfg: Config,
+    code_graph,
+    project_profile=None,
+) -> tuple[bool, str] | None:
+    """Attempt a diff-aware edit.  Returns ``(success, error_info)`` on
+    success, or ``None`` to signal the caller should fall back to the
+    full-file flow.
+    """
+    import re as _re
+
+    try:
+        from ..editing.scope_resolver import ScopeResolver
+        from ..editing.context_slicer import ContextSlicer
+        from ..editing.diff_parser import DiffParser
+        from ..editing.patch_applier import PatchApplier
+        from ..editing.metrics import log_edit_metric
+    except ImportError as exc:
+        log.debug("[DiffEdit] editing module not available: %s", exc)
+        return None
+
+    # Identify target file from step text or memory
+    target_file = _detect_target_file(step_text, memory)
+    if not target_file:
+        log.debug("[DiffEdit] No target file identified from step text")
+        return None
+
+    # Check the file actually exists on disk
+    if not os.path.isfile(target_file):
+        log.debug("[DiffEdit] Target file does not exist: %s", target_file)
+        return None
+
+    display.step_info(step_idx, f"[DiffEdit] Resolving scope for {os.path.basename(target_file)}...")
+
+    # 1. Resolve scope
+    resolver = ScopeResolver(code_graph)
+    scope = resolver.resolve(step_text, target_file, code_graph)
+
+    min_conf = getattr(cfg, "EDITING_MIN_CONFIDENCE", 0.60)
+    if scope.confidence < min_conf:
+        log.warning(
+            "[DiffEdit] Confidence %.2f < %.2f for %s, falling back",
+            scope.confidence, min_conf, target_file,
+        )
+        _log_fallback_metric(cfg, target_file, step_text, scope, "low_confidence")
+        return None
+
+    # 2. Slice files
+    ctx_lines = getattr(cfg, "EDITING_CONTEXT_LINES", 5)
+    slicer = ContextSlicer()
+
+    scopes_map: dict = {}
+    for af in scope.affected_files:
+        scopes_map[af] = scope
+
+    slices = slicer.slice_files(scopes_map)
+    formatted = slicer.format_for_prompt(slices)
+
+    # Prepend project orientation grounding to sliced context
+    if project_profile is not None:
+        try:
+            formatted = project_profile.format_for_prompt() + "\n\n" + formatted
+        except Exception:
+            pass
+
+    # Compute token stats
+    full_file_lines = 0
+    sliced_lines = 0
+    for fslice in slices.values():
+        full_file_lines += fslice.total_lines
+        sliced_lines += sum(b.line_end - b.line_start + 1 for b in fslice.slices)
+        if fslice.imports_block:
+            sliced_lines += fslice.imports_block.count("\n") + 1
+
+    display.step_info(step_idx, f"[DiffEdit] Sending {sliced_lines}/{full_file_lines} lines to LLM...")
+
+    # 3. Build diff prompt and call LLM
+    diff_prompt = _build_diff_prompt(step_text, formatted)
+    sent_before = token_tracker.total_prompt_tokens
+    recv_before = token_tracker.total_completion_tokens
+
+    llm_response = coder.llm_client.generate_response(diff_prompt)
+
+    sent_delta = token_tracker.total_prompt_tokens - sent_before
+    recv_delta = token_tracker.total_completion_tokens - recv_before
+    display.step_tokens(step_idx, sent_delta, recv_delta)
+
+    # 4. Parse diff
+    parser = DiffParser()
+    parsed = parser.parse(llm_response)
+
+    if parsed is None:
+        log.warning("[DiffEdit] LLM did not return valid diff format, falling back")
+        _log_fallback_metric(cfg, target_file, step_text, scope, "parse_failed")
+        return None
+
+    # Validate hunks against actual file content
+    file_contents: dict[str, list[str]] = {}
+    for patch in parsed.file_patches:
+        try:
+            with open(patch.file_path, "r", encoding="utf-8", errors="replace") as f:
+                file_contents[patch.file_path] = f.readlines()
+        except OSError:
+            pass
+
+    parsed = parser.validate(parsed, file_contents)
+    if parsed is None or not parsed.parse_successful:
+        log.warning("[DiffEdit] >50%% hunks invalid, falling back")
+        _log_fallback_metric(cfg, target_file, step_text, scope, "validation_failed")
+        return None
+
+    # 5. Apply patches
+    fuzzy_window = getattr(cfg, "EDITING_FUZZY_MATCH_WINDOW", 3)
+    validate_syntax = getattr(cfg, "EDITING_VALIDATE_SYNTAX", True)
+    fallback_syntax = getattr(cfg, "EDITING_FALLBACK_ON_SYNTAX_ERROR", True)
+
+    applier = PatchApplier(
+        fuzzy_match_window=fuzzy_window,
+        validate_syntax=validate_syntax,
+        fallback_on_syntax_error=fallback_syntax,
+    )
+    result = applier.apply(parsed)
+
+    if not result.success:
+        log.warning("[DiffEdit] Patch apply failed: %s", result.error)
+        _log_fallback_metric(cfg, target_file, step_text, scope, f"apply_failed: {result.error}")
+        return None
+
+    # Update memory with modified files
+    for fpath in result.files_modified:
+        try:
+            with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+                memory.update({fpath: f.read()})
+        except OSError:
+            pass
+
+    display.step_info(
+        step_idx,
+        f"[DiffEdit] Applied {result.hunks_applied} hunk(s) to "
+        f"{len(result.files_modified)} file(s)"
+    )
+
+    # Log metrics
+    if getattr(cfg, "EDITING_TRACK_METRICS", True):
+        reduction = (
+            round((1 - sliced_lines / full_file_lines) * 100, 1)
+            if full_file_lines > 0 else 0
+        )
+        log_edit_metric({
+            "file": target_file,
+            "task_length_chars": len(step_text),
+            "resolution_method": scope.resolution_method,
+            "confidence": round(scope.confidence, 2),
+            "full_file_lines": full_file_lines,
+            "sliced_lines_sent": sliced_lines,
+            "token_reduction_pct": reduction,
+            "hunks_applied": result.hunks_applied,
+            "hunks_failed": result.hunks_failed,
+            "fallback_used": False,
+            "syntax_valid": result.syntax_valid,
+            "affected_files_count": len(scope.affected_files),
+        })
+
+    return True, ""
+
+
+def _detect_target_file(step_text: str, memory: FileMemory) -> str | None:
+    """Try to identify the target file for editing from the step text."""
+    import re as _re
+
+    # Look for explicit file path mentions in the step text
+    known_files = list(memory.all_files().keys())
+
+    # Direct mention of a known file path
+    for fpath in known_files:
+        if fpath in step_text:
+            return fpath
+
+    # Check for basename mention
+    for fpath in known_files:
+        basename = os.path.basename(fpath)
+        if basename and basename in step_text and basename.count(".") > 0:
+            return fpath
+
+    # Look for file-path-like patterns in the step text
+    path_pattern = _re.compile(r'[\w/\\]+\.\w{1,5}')
+    for m in path_pattern.finditer(step_text):
+        candidate = m.group().replace("\\", "/")
+        for fpath in known_files:
+            if fpath.endswith(candidate) or candidate.endswith(fpath):
+                return fpath
+
+    # If only one file in memory, use it
+    if len(known_files) == 1:
+        return known_files[0]
+
+    return None
+
+
+def _detect_target_files(step_text: str, memory: FileMemory,
+                         max_files: int = 3) -> list[str]:
+    """Identify ALL target files for editing from the step text."""
+    import re as _re
+
+    known_files = list(memory.all_files().keys())
+    found: list[str] = []
+    found_set: set[str] = set()
+
+    def _add(fpath: str) -> None:
+        if fpath not in found_set and len(found) < max_files:
+            if os.path.isfile(fpath):
+                found.append(fpath)
+                found_set.add(fpath)
+
+    for fpath in known_files:
+        if fpath in step_text:
+            _add(fpath)
+
+    for fpath in known_files:
+        basename = os.path.basename(fpath)
+        if basename and basename in step_text and basename.count(".") > 0:
+            _add(fpath)
+
+    path_pattern = _re.compile(r'[\w/\\]+\.\w{1,5}')
+    for m in path_pattern.finditer(step_text):
+        candidate = m.group().replace("\\", "/")
+        for fpath in known_files:
+            if fpath.endswith(candidate) or candidate.endswith(fpath):
+                _add(fpath)
+
+    if not found and len(known_files) == 1:
+        _add(known_files[0])
+
+    return found
+
+
+def _build_chunk_prompt(
+    task_description: str,
+    formatted_chunks: str,
+    slim_context: str,
+    language: str | None = None,
+) -> str:
+    """Build the LLM prompt for chunk-level editing."""
+    lang_tag = language or "python"
+    return f"""You are editing existing code. You receive CHUNKS of files, not full files.
+You MUST respond ONLY with the chunks you want to change.
+Do NOT output unchanged chunks. Do NOT output full files.
+Do NOT use #### [FILE]: markers. Use #### [EDIT]: markers instead.
+
+Task: {task_description}
+
+{slim_context}
+
+{formatted_chunks}
+
+For EACH chunk you want to change, use EXACTLY this format:
+
+#### [EDIT]: {{file_path}}:{{function_or_class_name}} (lines {{start}}-{{end}})
+```{lang_tag}
+// complete replacement for this chunk only
+```
+
+For adding a NEW function/class, use:
+
+#### [NEW]: {{file_path}} (after line {{line_number}})
+```{lang_tag}
+// new code to insert
+```
+
+Rules:
+1. Only output chunks that ACTUALLY CHANGE
+2. Include the COMPLETE replacement chunk (not a partial diff)
+3. Preserve the function/class signature unless the task requires changing it
+4. Match the existing indentation style exactly
+5. Use the exact file paths shown in the context above
+6. The line numbers MUST match the line ranges shown in EDITABLE markers
+"""
+
+
+def _build_review_context(
+    new_files: dict[str, str],
+    memory: FileMemory,
+    step_text: str,
+) -> str:
+    """Build a compact review context showing only what changed."""
+    import difflib
+
+    parts: list[str] = []
+
+    for fpath, new_content in new_files.items():
+        old_content = memory.get(fpath)
+        if old_content is None and os.path.isfile(fpath):
+            try:
+                with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+                    old_content = f.read()
+            except OSError:
+                pass
+
+        if old_content is not None:
+            old_lines = old_content.splitlines(keepends=True)
+            new_lines = new_content.splitlines(keepends=True)
+            diff = difflib.unified_diff(
+                old_lines, new_lines,
+                fromfile=f"a/{fpath}", tofile=f"b/{fpath}",
+                n=3,
+            )
+            diff_text = "".join(diff)
+            if diff_text.strip():
+                parts.append(f"#### Changes in {fpath}:\n```diff\n{diff_text}```")
+            else:
+                parts.append(f"#### {fpath}: no changes")
+        else:
+            parts.append(f"#### [NEW FILE]: {fpath}\n```\n{new_content}\n```")
+
+    return "\n\n".join(parts)
+
+
+def _try_chunk_edit(
+    *,
+    step_text: str,
+    coder: CoderAgent,
+    reviewer: ReviewerAgent,
+    executor: Executor,
+    task: str,
+    memory: FileMemory,
+    display: CLIDisplay,
+    step_idx: int,
+    language: str | None,
+    cfg: Config,
+    auto: bool = False,
+    project_profile=None,
+) -> tuple[bool, str] | None:
+    """Attempt chunk-level editing. Returns (success, error) or None for fallback."""
+    try:
+        from ..editing.chunk_editor import ChunkEditor
+    except ImportError:
+        return None
+
+    max_files = getattr(cfg, "EDITING_MAX_CHUNK_FILES", 3)
+    target_files = _detect_target_files(step_text, memory, max_files=max_files)
+    if not target_files:
+        log.debug("[ChunkEdit] No target files identified")
+        return None
+
+    chunk_editor = ChunkEditor()
+    all_chunks: list = []
+    all_target_ids: list[str] = []
+
+    for fpath in target_files:
+        content = memory.get(fpath)
+        if content is None:
+            try:
+                with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read()
+            except OSError:
+                continue
+
+        chunks = chunk_editor.chunk_file(fpath, content)
+        if not chunks:
+            continue
+
+        targets = chunk_editor.identify_target_chunks(chunks, step_text)
+        if not targets:
+            targets = [c.chunk_id for c in chunks if c.chunk_type != "imports"]
+
+        all_chunks.extend(chunks)
+        all_target_ids.extend(targets)
+
+    if not all_chunks:
+        log.debug("[ChunkEdit] No chunks extracted")
+        return None
+
+    formatted = chunk_editor.format_chunks_for_prompt(all_chunks, all_target_ids)
+
+    slim_ctx = ""
+    if getattr(cfg, "EDITING_SLIM_CONTEXT", True):
+        slim_ctx = memory.related_context_slim(
+            step_text,
+            max_tokens=int((cfg.CONTEXT_WINDOW if cfg else 8192) * 0.3),
+        )
+        for tf in target_files:
+            pattern = f"#### [FILE_STRUCTURE]: {tf}"
+            if pattern in slim_ctx:
+                start = slim_ctx.find(pattern)
+                next_entry = slim_ctx.find("\n\n#### [FILE_STRUCTURE]:", start + 1)
+                if next_entry != -1:
+                    slim_ctx = slim_ctx[:start] + slim_ctx[next_entry + 2:]
+                else:
+                    slim_ctx = slim_ctx[:start].rstrip()
+
+    prompt_prefix = ""
+    if project_profile is not None:
+        try:
+            prompt_prefix = project_profile.format_for_prompt() + "\n\n"
+        except Exception:
+            pass
+
+    chunk_prompt = prompt_prefix + _build_chunk_prompt(
+        step_text, formatted, slim_ctx, language=language,
+    )
+
+    display.step_info(step_idx, f"[ChunkEdit] Sending {len(all_target_ids)} target chunks...")
+    sent_before = token_tracker.total_prompt_tokens
+    recv_before = token_tracker.total_completion_tokens
+
+    llm_response = coder.llm_client.generate_response(chunk_prompt)
+
+    sent_delta = token_tracker.total_prompt_tokens - sent_before
+    recv_delta = token_tracker.total_completion_tokens - recv_before
+    display.step_tokens(step_idx, sent_delta, recv_delta)
+
+    edits = chunk_editor.parse_chunk_response(llm_response)
+    if edits is None:
+        log.info("[ChunkEdit] LLM used full-file format or no edits parsed, falling back")
+        return None
+
+    edits_by_file: dict[str, list] = {}
+    for edit in edits:
+        edits_by_file.setdefault(edit.file_path, []).append(edit)
+
+    result_files: dict[str, str] = {}
+    for fpath, file_edits in edits_by_file.items():
+        original = memory.get(fpath)
+        if original is None:
+            try:
+                with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+                    original = f.read()
+            except OSError:
+                log.warning("[ChunkEdit] Cannot read original file: %s", fpath)
+                continue
+
+        try:
+            result_files[fpath] = chunk_editor.apply_chunk_edits(original, file_edits)
+        except Exception as exc:
+            log.warning("[ChunkEdit] Failed to apply edits to %s: %s", fpath, exc)
+            return None
+
+    if not result_files:
+        return None
+
+    approved = prompt_diff_approval(result_files, auto=auto)
+    if not approved:
+        display.step_info(step_idx, "Changes rejected by user")
+        return False, "User rejected chunk edits."
+
+    written = executor.write_files(result_files)
+    memory.update(result_files)
+    display.step_info(step_idx, f"[ChunkEdit] Written: {', '.join(written)}")
+
+    if _all_non_code_files(list(result_files.keys())):
+        display.step_info(step_idx, "Non-code files, skipping review")
+        return True, ""
+
+    review_ctx = _build_review_context(result_files, memory, step_text)
+    reviewer_mode = "diff" if getattr(cfg, "EDITING_REVIEWER_DIFF_MODE", True) else "full"
+
+    display.step_info(step_idx, "Reviewing changes...")
+    sent_before = token_tracker.total_prompt_tokens
+    recv_before = token_tracker.total_completion_tokens
+
+    review = reviewer.process(
+        f"Review this code change for the step: {step_text}\n\n{review_ctx}",
+        context=f"Step: {step_text}\nReview ONLY the changes shown.",
+        language=language,
+        review_mode=reviewer_mode,
+    )
+
+    sent_delta = token_tracker.total_prompt_tokens - sent_before
+    recv_delta = token_tracker.total_completion_tokens - recv_before
+    display.step_tokens(step_idx, sent_delta, recv_delta)
+
+    if review:
+        display.add_llm_log(review, source="Reviewer")
+
+    review_lower = review.lower()
+    approved = any(phrase in review_lower for phrase in (
+        "code looks good", "looks good", "no issues", "no critical issues",
+        "no bugs found", "code is correct", "functionally correct", "lgtm",
+    ))
+
+    if approved:
+        display.step_info(step_idx, "Review passed")
+        return True, ""
+
+    log.info("[ChunkEdit] Review found issues, falling back to full-file for retry")
+    return None
+
+
+def _build_diff_prompt(task_description: str, formatted_slices: str) -> str:
+    """Build the LLM prompt requesting a structured diff response."""
+    return f"""You are editing existing code. You will receive minimal file slices, not full files.
+You MUST respond with ONLY a diff in the exact format specified.
+NEVER rewrite the full file. NEVER include unchanged lines in your response.
+ALWAYS use the exact line numbers shown in the slice annotations.
+
+Task: {task_description}
+
+{formatted_slices}
+
+Respond with ONLY a diff in this exact format — nothing else:
+
+@@DIFF_START@@
+FILE: {{file_path}}
+{{replacement lines}}
+@@DIFF_END@@
+
+Rules:
+- Use line numbers from the slice annotations
+- Only include blocks that actually change
+- Preserve indentation exactly
+- If no changes needed for a file, omit it entirely
+- ORIGINAL block must match the slice content exactly
+- For multiple changes in the same file, include multiple ORIGINAL/UPDATED blocks under the same FILE header
+- For changes across multiple files, include multiple FILE sections"""
+
+
+def _log_fallback_metric(
+    cfg: Config,
+    target_file: str,
+    step_text: str,
+    scope,
+    reason: str,
+) -> None:
+    """Log a fallback metric entry."""
+    if not getattr(cfg, "EDITING_TRACK_METRICS", True):
+        return
+    try:
+        from ..editing.metrics import log_edit_metric
+        log_edit_metric({
+            "file": target_file,
+            "task_length_chars": len(step_text),
+            "resolution_method": scope.resolution_method,
+            "confidence": round(scope.confidence, 2),
+            "full_file_lines": 0,
+            "sliced_lines_sent": 0,
+            "token_reduction_pct": 0,
+            "hunks_applied": 0,
+            "hunks_failed": 0,
+            "fallback_used": True,
+            "fallback_reason": reason,
+            "syntax_valid": True,
+            "affected_files_count": len(scope.affected_files),
+        })
+    except Exception:
+        pass

@@ -13,6 +13,10 @@ SKIP_DIRS = {
     ".agentchanti", "logs",
 }
 
+SKIP_FILES = {
+    ".agentchanti.yaml",".agentchanti_checkpoint.json", ".agentchanti.yml",
+}
+
 SKIP_EXTENSIONS = {
     ".pyc", ".pyo", ".exe", ".dll", ".so", ".dylib", ".o", ".obj",
     ".class", ".jar", ".war", ".zip", ".tar", ".gz", ".bz2",
@@ -81,6 +85,8 @@ def scan_project(directory: str = ".") -> dict:
         tree_lines.append(f"{indent}{dir_name}/")
 
         for fname in sorted(files):
+            if fname in SKIP_FILES:
+                continue
             _, ext = os.path.splitext(fname)
             if ext in SKIP_EXTENSIONS:
                 continue
@@ -130,6 +136,8 @@ def collect_source_files(directory: str = ".") -> dict[str, str]:
         dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS)
 
         for fname in sorted(files):
+            if fname in SKIP_FILES:
+                continue
             _, ext = os.path.splitext(fname)
             if ext not in SOURCE_EXTENSIONS:
                 continue

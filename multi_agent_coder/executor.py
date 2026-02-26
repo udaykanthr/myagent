@@ -315,6 +315,7 @@ class Executor:
         'composer.json', 'composer.lock',
         'Pipfile', 'Pipfile.lock', 'poetry.lock',
         'requirements.txt',
+        '.agentchanti.yaml', '.agentchanti.yml',
     }
 
     # Common mojibake patterns: UTF-8 bytes misinterpreted as Latin-1/cp1252.

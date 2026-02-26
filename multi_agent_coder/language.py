@@ -183,7 +183,7 @@ _CODE_BLOCK_LANGS = {
 # Directories to skip when scanning for language detection
 _SKIP_DIRS = {".git", "node_modules", "__pycache__", "venv", ".venv",
               "env", "dist", "build", ".tox", ".mypy_cache", ".pytest_cache",
-              "target", "bin", "obj", ".idea", ".vscode"}
+              "target", "bin", "obj", ".idea", ".vscode", ".agentchanti"}
 
 
 def detect_language(directory: str = ".") -> str:

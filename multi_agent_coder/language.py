@@ -34,6 +34,8 @@ EXTENSION_MAP = {
     ".sh": "bash",
     ".bat": "batch",
     ".ps1": "powershell",
+    ".css": "css",
+    ".html": "html",
 }
 
 

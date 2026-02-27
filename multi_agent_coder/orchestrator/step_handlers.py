@@ -16,7 +16,7 @@ from ..executor import Executor
 from ..cli_display import CLIDisplay, token_tracker, log
 from ..language import (
     get_code_block_lang, get_test_framework, detect_test_runner,
-    detect_language_from_files,
+    detect_language_from_files, EXTENSION_MAP,
 )
 
 from .memory import FileMemory
@@ -807,6 +807,36 @@ def _auto_fix_hazards(files: dict[str, str], coder: CoderAgent,
     return fixed_files
 
 
+def _quick_offline_lint(files: dict[str, str]) -> str:
+    """Perform a quick offline syntax/linter check on generated files."""
+    errors = []
+    import os
+    
+    try:
+        from syntax_checker import check_syntax
+    except ImportError:
+        check_syntax = None
+
+    for filepath, content in files.items():
+        ext = os.path.splitext(filepath)[1].lower()
+        if ext.startswith('.'):
+            ext = ext[1:]
+
+        if check_syntax:
+            supported_exts = {k.lstrip('.') for k in EXTENSION_MAP.keys()}
+            if ext in supported_exts:
+                try:
+                    result = check_syntax(ext, content)
+                    if hasattr(result, 'errors') and result.errors:
+                        errors.append(f"{filepath} SyntaxError:\n{result.description}")
+                except Exception as e:
+                    errors.append(f"{filepath}: Error parsing: {str(e)}")
+                    
+    if errors:
+        return "LINTER ERRORS FOUND:\n" + "\n".join(errors) + "\n\n"
+    return ""
+
+
 def _handle_code_step(step_text: str, coder: CoderAgent, reviewer: ReviewerAgent,
                       executor: Executor, task: str, memory: FileMemory,
                       display: CLIDisplay, step_idx: int,
@@ -948,19 +978,22 @@ def _handle_code_step(step_text: str, coder: CoderAgent, reviewer: ReviewerAgent
         sent_before = token_tracker.total_prompt_tokens
         recv_before = token_tracker.total_completion_tokens
 
+        lint_errors = _quick_offline_lint(files)
+        lint_context = f"\n\n{lint_errors}Please fix these errors in your review." if lint_errors else ""
+
         use_diff_review = cfg and getattr(cfg, "EDITING_REVIEWER_DIFF_MODE", True)
         if use_diff_review:
             review_ctx = _build_review_context(files, memory, step_text)
             review = reviewer.process(
                 f"Review this code change for the step: {step_text}\n\n{review_ctx}",
-                context=f"Step: {step_text}\nReview ONLY the changes shown.",
+                context=f"Step: {step_text}\nReview ONLY the changes shown.{lint_context}",
                 language=language,
                 review_mode="diff",
             )
         else:
             review = reviewer.process(
                 f"Review this code for the step: {step_text}\n\n{response}",
-                context=f"Step: {step_text}\nOnly review changes relevant to this step.",
+                context=f"Step: {step_text}\nOnly review changes relevant to this step.{lint_context}",
                 language=language,
             )
 
@@ -1268,9 +1301,12 @@ def _handle_test_step(step_text: str, tester: TesterAgent, coder: CoderAgent,
         sent_before = token_tracker.total_prompt_tokens
         recv_before = token_tracker.total_completion_tokens
 
+        lint_errors = _quick_offline_lint(test_files)
+        lint_context = f"\n\n{lint_errors}Please fix these errors in your review." if lint_errors else ""
+
         review = reviewer.process(
             f"Review these tests for correctness, especially import paths:\n{test_response}",
-            context=f"Project files: {memory.summary()}\n{code_summary}",
+            context=f"Project files: {memory.summary()}\n{code_summary}{lint_context}",
             language=language,
         )
 
@@ -1996,9 +2032,11 @@ def _try_chunk_edit(
     sent_before = token_tracker.total_prompt_tokens
     recv_before = token_tracker.total_completion_tokens
 
+    lint_errors = _quick_offline_lint(result_files)
+    lint_context = f"\n\n{lint_errors}Please fix these errors in your review." if lint_errors else ""
     review = reviewer.process(
         f"Review this code change for the step: {step_text}\n\n{review_ctx}",
-        context=f"Step: {step_text}\nReview ONLY the changes shown.",
+        context=f"Step: {step_text}\nReview ONLY the changes shown. {lint_context}",
         language=language,
         review_mode=reviewer_mode,
     )

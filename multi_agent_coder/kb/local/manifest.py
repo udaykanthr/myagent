@@ -265,6 +265,22 @@ class Manifest:
             for r in rows
         ]
 
+    def get_symbol_occurrences(self) -> list[tuple[str, str, str]]:
+        """
+        Return all symbols with their type and the file path they occur in.
+        
+        Returns
+        -------
+        list[tuple[str, str, str]]
+            List of (symbol_name, symbol_type, file_path)
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT s.name, s.symbol_type, f.path "
+                "FROM symbols s JOIN files f ON s.file_id = f.id"
+            ).fetchall()
+        return [(r["name"], r["symbol_type"], r["path"]) for r in rows]
+
     def get_embedded_hash(self, path: str) -> Optional[str]:
         """
         Return the last embedded hash for *path*, or None if not set.

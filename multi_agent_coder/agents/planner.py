@@ -37,6 +37,7 @@ Write a numbered list. Each step MUST be a single, concrete action:
 
 2. **One action per step**: Each step should do ONE thing. Don't combine
    "create file AND install package" in one step. Split them.
+   Exception: ALL modifications to the SAME file MUST be combined into a single CODE step.
 
 3. **CMD steps for shell commands**: Installing packages, running scripts,
    creating directories — put the exact command in backticks.
@@ -45,6 +46,9 @@ Write a numbered list. Each step MUST be a single, concrete action:
 4. **CODE steps for file changes**: Creating or modifying source files.
    Always specify the file path. For modifications, say "Update `path/to/file`"
    and describe WHAT to change.
+   CRITICAL: You MUST combine ALL changes for a single file into exactly ONE CODE step.
+   DO NOT create multiple steps for the same file under any circumstances. If a file needs
+   multiple changes (e.g., updating a function and adding imports), describe ALL of them in the same step's context.
 
 5. **Existing files = MODIFY, not recreate**: When files already exist in the
    project (shown in context above), plan to UPDATE them. Reference their

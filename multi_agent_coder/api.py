@@ -144,7 +144,7 @@ def _run_task_impl(
         llm_client = LMStudioClient(
             base_url=cfg.LM_STUDIO_BASE_URL, model=model, **llm_kwargs)
 
-    # Project scan
+    # Project scan TODO: Dont scan entire project instead scan only the files that are relevant to the task or 1 layer of folders
     scan_result = scan_project(".")
     source_files = collect_source_files(".")
     project_context = format_scan_for_planner(
@@ -189,7 +189,7 @@ def _run_task_impl(
     display = CLIDisplay(task)
     memory = FileMemory(embedding_store=embed_store, top_k=cfg.EMBEDDING_TOP_K)
 
-    # Search agent
+    # Search agent TODO: should be running only on a condition?
     search_agent = None
     if cfg.SEARCH_ENABLED:
         from .agents.search import SearchAgent

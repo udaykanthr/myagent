@@ -300,6 +300,79 @@ class Executor:
                     rest = block.split("\n", 1)[1] if "\n" in block else ""
                     Executor._try_add_file(files, filename, rest.rstrip("\n"))
 
+        if files:
+            return files
+
+        # ── Pattern 5: KB Index Symbol Matching ──
+        # If the LLM generates a pure anonymous code block, parse it
+        # and match symbols against the knowledge base manifest.
+        log.info("[Executor] Falling back to KB symbol matching (Pattern 5) for anonymous block")
+        
+        db_path = os.path.join(os.getcwd(), ".agentchanti", "kb", "local", "index.db")
+        if not os.path.exists(db_path):
+             return files
+        
+        try:
+             from .kb.local.manifest import Manifest
+             from .kb.local.parser import parse_code
+             m = Manifest(db_path)
+             symbol_occurrences = m.get_symbol_occurrences()
+             symbol_to_files = {}
+             # Create dict matching symbol names to their files
+             for row in symbol_occurrences:
+                 name, type_, path_ = row[0], row[1], row[2]
+                 if name not in symbol_to_files:
+                     symbol_to_files[name] = set()
+                 symbol_to_files[name].add(path_)
+                 
+             for match in re.finditer(r"```([a-zA-Z0-9_\-\+]+)?\n(.*?)```", text, re.DOTALL):
+                 lang = match.group(1) or ""
+                 block = match.group(2)
+                 
+                 # Some language normalization
+                 normalized_lang = lang.lower()
+                 if normalized_lang in ("js", "javascript"):
+                     normalized_lang = "javascript"
+                 elif normalized_lang in ("ts", "typescript"):
+                     normalized_lang = "typescript"
+                 elif normalized_lang in ("py", "python"):
+                     normalized_lang = "python"
+                 elif normalized_lang in ("c++", "cpp"):
+                     normalized_lang = "cpp"
+                 
+                 # It's an anonymous code block.
+                 if not block.strip():
+                     continue
+                 
+                 parsed = parse_code(block.encode('utf-8'), normalized_lang)
+                 
+                 # Collect unique symbols from the code block (only high-confidence ones)
+                 block_symbols = set()
+                 for func in parsed.functions:
+                     if len(func.name) > 3 or len(parsed.functions) > 1:
+                         block_symbols.add(func.name)
+                 for cls in parsed.classes:
+                     block_symbols.add(cls.name)
+                     
+                 # Score each file based on overlap
+                 file_scores = {}
+                 for sym in block_symbols:
+                     if sym in symbol_to_files:
+                         for fpath in symbol_to_files[sym]:
+                             file_scores[fpath] = file_scores.get(fpath, 0) + 1
+                             
+                 # Find file with best score
+                 if file_scores:
+                     best_file = max(file_scores.keys(), key=lambda k: file_scores[k])
+                     best_score = file_scores[best_file]
+                     
+                     if best_score > 0:
+                         log.info(f"[Executor] Pattern 5 assigned block to {best_file} with score {best_score}")
+                         Executor._try_add_file(files, best_file, block.rstrip("\n"))
+                         
+        except Exception as e:
+            log.warning(f"[Executor] Failed KB symbol matching (Pattern 5): {e}")
+
         return files
 
     # Dependency manifests and lock files that should NEVER be overwritten

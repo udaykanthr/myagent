@@ -86,7 +86,8 @@ class GeminiClient(LLMClient):
 
         response = requests.post(url, json=payload, stream=True, timeout=(10, 120))
         response.raise_for_status()
-
+        # Logging the headers as the body stream can't be read before iter_lines
+        log.debug(f"[Gemini] Response Status: {response.status_code}, Headers: {dict(response.headers)}")
         for line in response.iter_lines(decode_unicode=True):
             if not line:
                 continue
@@ -96,6 +97,7 @@ class GeminiClient(LLMClient):
                     break
                 try:
                     chunk = json.loads(data_str)
+                    log.debug(f"[Gemini] Chunk: {chunk}")
                     candidates = chunk.get("candidates", [])
                     if not candidates:
                         continue

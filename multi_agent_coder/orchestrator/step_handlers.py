@@ -6,6 +6,7 @@ MAX_TEST_GEN_RETRIES = 2
 
 import json
 import os
+import re
 import shutil
 
 from ..config import Config
@@ -508,12 +509,73 @@ def _detect_subproject_root(memory: FileMemory) -> str | None:
     """Detect if all project files share a common subdirectory prefix.
 
     When an earlier CMD step created a project in a subdirectory (e.g.
-    ``npx create-react-app my-app``), subsequent files in memory will all
+    ``npx create-next-app my-app``), subsequent files in memory will all
     live under ``my-app/``.  This function finds that common root.
+
+    Detection strategies (in order):
+    1. Parse CMD outputs for project-creation commands that specify a
+       subdirectory (e.g. ``npx create-next-app my-app``).
+    2. Check if all source files share a single first directory component.
+    3. Look for project manifests in memory or on disk.
+    4. Majority vote among first-level directories.
 
     Returns the subdirectory name (e.g. ``my-app``) or ``None``.
     """
     all_files = memory.all_files()
+
+    # ── Fallback 0: Parse CMD outputs for project-creation commands ──
+    # This is the EARLIEST detection — it works even when no source files
+    # have been written to memory yet, only _cmd_output/ entries exist.
+    # We look for commands like "npx create-next-app my-app" and extract
+    # the directory name from the command itself.
+    _PROJECT_CREATE_PATTERNS = [
+        # npx create-next-app <dir>
+        re.compile(r'create-next-app(?:@\S+)?\s+(\S+)'),
+        # npx create-react-app <dir>
+        re.compile(r'create-react-app\s+(\S+)'),
+        # npx create-vite <dir>
+        re.compile(r'create-vite(?:@\S+)?\s+(\S+)'),
+        # npx create-vue <dir>
+        re.compile(r'create-vue(?:@\S+)?\s+(\S+)'),
+        # vue create <dir>
+        re.compile(r'vue\s+create\s+(\S+)'),
+        # ng new <dir>
+        re.compile(r'ng\s+new\s+(\S+)'),
+        # rails new <dir>
+        re.compile(r'rails\s+new\s+(\S+)'),
+        # cargo new <dir>
+        re.compile(r'cargo\s+new\s+(\S+)'),
+        # django-admin startproject <dir>
+        re.compile(r'django-admin\s+startproject\s+(\S+)'),
+    ]
+
+    for fpath, content in all_files.items():
+        if not fpath.startswith('_cmd_output/') and not fpath.startswith('_fix_output/'):
+            continue
+        # Only scan the first line (the command itself, prefixed with $)
+        first_line = content.split('\n')[0] if content else ''
+        for pattern in _PROJECT_CREATE_PATTERNS:
+            m = pattern.search(first_line)
+            if m:
+                candidate = m.group(1).strip().rstrip('/')
+                # Skip if the command used ./ (current directory)
+                if candidate in ('.', './', ''):
+                    continue
+                # Strip leading ./ if present
+                if candidate.startswith('./'):
+                    candidate = candidate[2:]
+                if not candidate:
+                    continue
+                # Verify the directory actually exists on disk with a manifest
+                if os.path.isdir(candidate):
+                    for manifest in ('package.json', 'Cargo.toml', 'go.mod',
+                                     'requirements.txt', 'Gemfile', 'pyproject.toml',
+                                     'composer.json', 'manage.py'):
+                        if os.path.isfile(os.path.join(candidate, manifest)):
+                            log.info(f"[SubProject] Detected sub-project root "
+                                     f"from CMD output ({manifest}): {candidate}/")
+                            return candidate
+
     # Only consider real source files, not internal tracking paths.
     # Internal paths use underscore-prefixed directories (_cmd_output/,
     # _fix_output/, etc.) and must be excluded from sub-project detection.
@@ -524,6 +586,22 @@ def _detect_subproject_root(memory: FileMemory) -> str | None:
     if not source_paths:
         return None
 
+    # Directories that are NOT sub-project roots — they are conventional
+    # source subdirectories within a project.  If the common first component
+    # is one of these, we should NOT treat it as a sub-project generator root.
+    _NON_SUBPROJECT_DIRS = {
+        'src', 'lib', 'app', 'apps', 'api', 'pkg',
+        'components', 'pages', 'routes', 'views',
+        'utils', 'helpers', 'hooks', 'styles', 'css',
+        'public', 'static', 'assets', 'images', 'fonts',
+        'tests', 'test', '__tests__', 'spec', 'specs',
+        'docs', 'documentation', 'scripts', 'config',
+        'dist', 'build', 'out', 'output',
+        'models', 'controllers', 'services', 'repositories',
+        'migrations', 'fixtures', 'seeds',
+        'middleware', 'decorators', 'validators',
+    }
+
     # Extract first path component from each file
     first_components: set[str] = set()
     for p in source_paths:
@@ -532,11 +610,12 @@ def _detect_subproject_root(memory: FileMemory) -> str | None:
             first_components.add(parts[0])
 
     # If all files share the same single first directory component,
-    # that's our sub-project root
+    # that's our sub-project root — unless it's a well-known source directory
     if len(first_components) == 1:
         subproject = first_components.pop()
-        # Sanity check: the directory should exist on disk
-        if os.path.isdir(subproject):
+        # Sanity check: directory must exist on disk and not be a common
+        # source directory name (which would be a false positive)
+        if os.path.isdir(subproject) and subproject not in _NON_SUBPROJECT_DIRS:
             log.info(f"[SubProject] Detected sub-project root: {subproject}/")
             return subproject
 
@@ -592,6 +671,49 @@ def _detect_subproject_root(memory: FileMemory) -> str | None:
                 return best
 
     return None
+
+
+def _prefix_subproject_paths(files: dict[str, str],
+                             subproject: str,
+                             memory: FileMemory) -> dict[str, str]:
+    """Prefix file paths with the sub-project root when missing.
+
+    When the LLM generates paths like ``components/Header.tsx`` but the
+    project lives under ``my-app/``, this function rewrites them to
+    ``my-app/components/Header.tsx``.
+
+    Files that are already prefixed, already known in memory, or are
+    internal tracking paths (``_cmd_output/`` etc.) are left unchanged.
+    """
+    if not subproject:
+        return files
+
+    prefix = subproject.rstrip('/') + '/'
+    known_paths = set(memory.all_files().keys())
+    corrected: dict[str, str] = {}
+
+    for fpath, content in files.items():
+        # Skip internal tracking paths
+        if fpath.startswith('_'):
+            corrected[fpath] = content
+            continue
+
+        # Already has the sub-project prefix
+        if fpath.startswith(prefix):
+            corrected[fpath] = content
+            continue
+
+        # Already a known file in memory (exact match) — don't touch
+        if fpath in known_paths:
+            corrected[fpath] = content
+            continue
+
+        # Prefix with sub-project root
+        new_path = prefix + fpath
+        log.info(f"[SubProject] Prefixed '{fpath}' → '{new_path}'")
+        corrected[new_path] = content
+
+    return corrected
 
 
 def _handle_cmd_step(step_text: str, executor: Executor,
@@ -908,6 +1030,12 @@ def _handle_code_step(step_text: str, coder: CoderAgent, reviewer: ReviewerAgent
         # Normalize paths: fix LLM-generated paths that are suffixes of
         # known project files (e.g. src/App.js → my-app/src/App.js)
         files = _normalize_fix_paths(files, memory)
+
+        # Prefix files with sub-project root if detected
+        # (e.g. components/Header.tsx → my-app/components/Header.tsx)
+        subproject = _detect_subproject_root(memory)
+        if subproject:
+            files = _prefix_subproject_paths(files, subproject, memory)
 
         # Strip protected manifest files (package.json, etc.) to prevent
         # LLM from overwriting them with corrupted versions

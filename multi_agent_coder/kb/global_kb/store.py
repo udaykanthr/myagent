@@ -62,7 +62,7 @@ class GlobalKBStore:
             _CORE_DIR, "errors.db"
         )
         self._error_dict: Optional[ErrorDict] = None
-        self._qdrant_store = None
+        self._vector_store = None
 
     # ------------------------------------------------------------------
     # Lazy initializers
@@ -74,12 +74,11 @@ class GlobalKBStore:
             self._error_dict = ErrorDict(self._errors_db_path)
         return self._error_dict
 
-    def _get_qdrant_store(self):
-        """Return the global Qdrant store (lazy)."""
-        if self._qdrant_store is None:
-            from .seeder import _GlobalQdrantStore
-            self._qdrant_store = _GlobalQdrantStore()
-        return self._qdrant_store
+    def _get_vector_store(self):
+        """Return the global vector store (lazy)."""
+        if self._vector_store is None:
+            self._vector_store = _get_global_vector_store()
+        return self._vector_store
 
     # ------------------------------------------------------------------
     # Public API
@@ -91,6 +90,7 @@ class GlobalKBStore:
         categories: Optional[list[str]] = None,
         language: Optional[str] = None,
         top_k: int = 5,
+        api_client=None,
     ) -> list[GlobalKBResult]:
         """
         Semantic search across all global KB content.
@@ -105,6 +105,8 @@ class GlobalKBStore:
             Filter by language (e.g. ``"python"``).
         top_k:
             Maximum number of results.
+        api_client:
+            LLM client to use for embedding the query.
 
         Returns
         -------
@@ -112,9 +114,11 @@ class GlobalKBStore:
             Ranked results.
         """
         try:
-            return self._qdrant_search(query, categories, language, top_k)
+            if api_client is None:
+                raise ValueError("api_client required for vector search")
+            return self._vector_search(query, categories, language, top_k, api_client)
         except Exception as exc:
-            logger.warning("Qdrant search failed, falling back to file search: %s", exc)
+            logger.warning("Vector search failed, falling back to file search: %s", exc)
             return self._fallback_file_search(query, categories, language, top_k)
 
     def search_errors(
@@ -148,6 +152,7 @@ class GlobalKBStore:
     def get_behavioral_instructions(
         self,
         context: str,
+        api_client=None,
     ) -> list[GlobalKBResult]:
         """
         Retrieve behavioral instructions relevant to *context*.
@@ -158,6 +163,8 @@ class GlobalKBStore:
         ----------
         context:
             Description of the current task or situation.
+        api_client:
+            LLM client for embedding the query.
 
         Returns
         -------
@@ -168,29 +175,34 @@ class GlobalKBStore:
             query=context,
             categories=["behavioral"],
             top_k=3,
+            api_client=api_client,
         )
 
     # ------------------------------------------------------------------
-    # Qdrant search
+    # Vector search
     # ------------------------------------------------------------------
 
-    def _qdrant_search(
+    def _vector_search(
         self,
         query: str,
         categories: Optional[list[str]],
         language: Optional[str],
         top_k: int,
+        api_client,
     ) -> list[GlobalKBResult]:
-        """Perform semantic search via Qdrant."""
-        from ..local.embedder import _get_openai_client, _embed_batch
+        """Perform semantic search via the vector store."""
+        from ..local.embedder import _embed_batch
+        from ...config import Config
 
-        client = _get_openai_client()
-        vectors = _embed_batch(client, [query])
+        cfg = Config.load()
+        embed_model = cfg.EMBEDDING_MODEL or cfg.DEFAULT_MODEL
+
+        vectors = _embed_batch(api_client, [query], embed_model)
         if not vectors:
             return []
         query_vector = vectors[0]
 
-        store = self._get_qdrant_store()
+        store = self._get_vector_store()
 
         # Build filters
         filters: Optional[dict] = {}
@@ -303,3 +315,27 @@ class GlobalKBStore:
 
         results.sort(key=lambda x: x[0], reverse=True)
         return [r for _, r in results[:top_k]]
+
+
+# ---------------------------------------------------------------------------
+# Global Vector Store Factory
+# ---------------------------------------------------------------------------
+
+def _get_global_vector_store():
+    from ...config import Config
+    cfg = Config.load()
+    backend = cfg.KB_VECTOR_BACKEND
+    
+    if backend == "qdrant":
+        try:
+            from .seeder import _GlobalQdrantStore
+            from ..local.vector_store import is_qdrant_running
+            if is_qdrant_running():
+                return _GlobalQdrantStore()
+        except ImportError:
+            logger.warning("Qdrant not available, falling back to global SQLite.")
+
+    # Fallback / Default: SQLite
+    from ..local.sqlite_vector_store import SQLiteVectorStore
+    db_path = os.path.join(_CORE_DIR, "global_kb.db")
+    return SQLiteVectorStore(project_root="", db_path=db_path)

@@ -1,12 +1,35 @@
 from .base import Agent
 from ..language import get_code_block_lang, get_language_name
 
+# Mapping from language key → real file extension for prompt examples.
+# This prevents the LLM from creating files like "src/my_module.python"
+# when the correct extension is ".py".
+_LANG_TO_EXT = {
+    "python": ".py",
+    "javascript": ".js",
+    "typescript": ".ts",
+    "go": ".go",
+    "rust": ".rs",
+    "java": ".java",
+    "ruby": ".rb",
+    "csharp": ".cs",
+    "cpp": ".cpp",
+    "c": ".c",
+    "swift": ".swift",
+    "kotlin": ".kt",
+    "php": ".php",
+    "scala": ".scala",
+    "lua": ".lua",
+}
+
 
 class CoderAgent(Agent):
     def process(self, task: str, context: str = "", language: str | None = None) -> str:
         prompt = self._build_prompt(task, context, language=language)
         lang_tag = get_code_block_lang(language) if language else "python"
         lang_name = get_language_name(language) if language else "Python"
+        # Use the real file extension for the example, not the lang_tag
+        example_ext = _LANG_TO_EXT.get(language or "python", ".py")
 
         # Extract known file paths from context so the LLM knows the real layout
         import re
@@ -22,7 +45,7 @@ the FIRST attempt with no fixes needed.
 ═══════ OUTPUT FORMAT ═══════
 For EACH file, use EXACTLY this marker (no extra text after the path):
 
-#### [FILE]: src/my_module.{lang_tag}
+#### [FILE]: src/my_module{example_ext}
 ```{lang_tag}
 # complete code here
 ```

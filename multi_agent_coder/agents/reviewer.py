@@ -6,7 +6,7 @@ class ReviewerAgent(Agent):
     def process(self, task: str, context: str = "", language: str | None = None,
                 review_mode: str = "full") -> str:
         prompt = self._build_prompt(task, context, language=language)
-        lang_name = get_language_name(language) if language else "Python"
+        lang_name = get_language_name(language) if language else "the project's language"
 
         if review_mode == "diff":
             prompt += self._diff_review_prompt(lang_name)

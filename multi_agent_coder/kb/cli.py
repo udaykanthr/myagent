@@ -453,10 +453,50 @@ def _cmd_seed(args: argparse.Namespace) -> None:
 
     embed = not getattr(args, "no_embed", False)
     project_root = _project_root()
+    
+    api_client = None
+    if embed:
+        from ..config import Config
+        from ..llm.ollama import OllamaClient
+        from ..llm.lm_studio import LMStudioClient
+
+        cfg = Config.load()
+        provider = cfg.PROVIDER
+        if provider == "ollama":
+            api_client = OllamaClient(
+                base_url=cfg.OLLAMA_BASE_URL,
+                model=cfg.EMBEDDING_MODEL or cfg.DEFAULT_MODEL,
+            )
+        elif provider == "openai":
+            from ..llm.openai_client import OpenAIClient
+            api_client = OpenAIClient(
+                base_url=cfg.OPENAI_BASE_URL,
+                model=cfg.EMBEDDING_MODEL or cfg.DEFAULT_MODEL,
+                api_key=cfg.OPENAI_API_KEY,
+            )
+        elif provider == "gemini":
+            from ..llm.gemini_client import GeminiClient
+            api_client = GeminiClient(
+                base_url=cfg.GEMINI_BASE_URL,
+                model=cfg.EMBEDDING_MODEL or cfg.DEFAULT_MODEL,
+                api_key=cfg.GEMINI_API_KEY,
+            )
+        elif provider == "anthropic":
+            from ..llm.anthropic_client import AnthropicClient
+            api_client = AnthropicClient(
+                base_url=cfg.ANTHROPIC_BASE_URL,
+                model=cfg.EMBEDDING_MODEL or cfg.DEFAULT_MODEL,
+                api_key=cfg.ANTHROPIC_API_KEY,
+            )
+        else:
+            api_client = LMStudioClient(
+                base_url=cfg.LM_STUDIO_BASE_URL,
+                model=cfg.EMBEDDING_MODEL or cfg.DEFAULT_MODEL,
+            )
 
     print("Seeding global knowledge base...")
     t0 = time.perf_counter()
-    summary = seed(embed=embed, project_root=project_root)
+    summary = seed(embed=embed, project_root=project_root, api_client=api_client)
     elapsed = time.perf_counter() - t0
 
     print(

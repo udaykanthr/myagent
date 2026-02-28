@@ -131,8 +131,10 @@ TEST_FRAMEWORKS = {
 
 _TASK_KEYWORDS = {
     "python":     ["python", "flask", "django", "fastapi", "pip", "pytest", "pandas", "numpy"],
-    "javascript": ["javascript", "node", "express", "react", "vue", "npm", "webpack", "jest"],
-    "typescript": ["typescript", "angular", "nest", "tsx", "tsc"],
+    "javascript": ["javascript", "node", "express", "react", "vue", "npm", "webpack", "jest",
+                   "next.js", "nextjs", "next js", "create-next-app", "nuxt", "vite",
+                   "svelte", "gatsby", "remix"],
+    "typescript": ["typescript", "angular", "nest", "tsx", "tsc", "nestjs"],
     "go":         ["golang", "go module", "gin", "echo framework"],
     "rust":       ["rust", "cargo", "tokio", "actix"],
     "java":       ["java", "spring", "maven", "gradle", "junit"],

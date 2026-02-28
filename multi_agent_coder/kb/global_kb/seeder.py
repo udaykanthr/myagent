@@ -1091,6 +1091,7 @@ def _write_md_file(
 def seed(
     embed: bool = True,
     project_root: Optional[str] = None,
+    api_client=None,
 ) -> dict:
     """
     Seed the global knowledge base with sample data.
@@ -1102,6 +1103,8 @@ def seed(
         collection.  Requires Qdrant running and OpenAI API key.
     project_root:
         Project root for Qdrant storage path.  Defaults to cwd.
+    api_client:
+        LLM client to use for embedding.
 
     Returns
     -------
@@ -1173,10 +1176,12 @@ def seed(
     summary["docs_seeded"] = len(md_files)
     logger.info("Wrote %d markdown documents", summary["docs_seeded"])
 
-    # ── 3. Embed into Qdrant (optional) ─────────────────────────────────
+    # ── 3. Embed into Qdrant/SQLite (optional) ──────────────────────────
     if embed:
         try:
-            embedded = _embed_md_files(md_files, project_root)
+            if api_client is None:
+                raise ValueError("api_client required for embedding")
+            embedded = _embed_md_files(md_files, project_root, api_client)
             summary["chunks_embedded"] = embedded
         except Exception as exc:
             logger.warning("Embedding skipped: %s", exc)
@@ -1188,26 +1193,24 @@ def seed(
 def _embed_md_files(
     md_files: list[tuple[str, str, str]],
     project_root: str,
+    api_client,
 ) -> int:
     """
-    Embed markdown files into the Qdrant ``global_kb`` collection.
+    Embed markdown files into the `global_kb` collection.
 
     Reuses the embedding helpers from kb.local.embedder.
 
     Returns the total number of chunks embedded.
     """
-    from ..local.embedder import _get_openai_client, _embed_batch, BATCH_SIZE, make_point_id
-    from ..local.vector_store import QdrantStore, is_qdrant_running, VECTOR_SIZE
+    from ..local.embedder import _embed_batch, BATCH_SIZE, make_point_id
+    from .store import _get_global_vector_store
+    from ...config import Config
 
-    if not is_qdrant_running():
-        raise ConnectionError(
-            "Qdrant is not running. Start it with: agentchanti kb qdrant start"
-        )
+    cfg = Config.load()
+    embed_model = cfg.EMBEDDING_MODEL or cfg.DEFAULT_MODEL
 
     # Create a store for the global_kb collection
-    store = _GlobalQdrantStore()
-
-    client = _get_openai_client()
+    store = _get_global_vector_store()
     total_chunks = 0
 
     for filepath, category, title in md_files:
@@ -1238,7 +1241,7 @@ def _embed_md_files(
         for i in range(0, len(chunks), BATCH_SIZE):
             batch = chunks[i : i + BATCH_SIZE]
             try:
-                vectors = _embed_batch(client, batch)
+                vectors = _embed_batch(api_client, batch, embed_model)
             except RuntimeError as exc:
                 logger.warning("Embedding failed for %s: %s", filepath, exc)
                 continue
@@ -1281,97 +1284,4 @@ def _parse_frontmatter(text: str) -> dict[str, str]:
     return meta
 
 
-# ---------------------------------------------------------------------------
-# Global Qdrant store helper
-# ---------------------------------------------------------------------------
 
-class _GlobalQdrantStore:
-    """
-    Thin Qdrant wrapper for the ``global_kb`` collection.
-
-    Reuses the Qdrant client patterns from ``kb.local.vector_store``.
-    """
-
-    COLLECTION = "global_kb"
-
-    def __init__(self) -> None:
-        self._client = None
-
-    def _get_client(self):
-        from ..local.vector_store import QDRANT_HOST, QDRANT_PORT, is_qdrant_running
-        if self._client is not None:
-            return self._client
-        try:
-            from qdrant_client import QdrantClient
-        except ImportError as exc:
-            raise ImportError(
-                "qdrant-client is required. "
-                "Install with: pip install 'multi_agent_coder[semantic]'"
-            ) from exc
-        if not is_qdrant_running():
-            raise ConnectionError("Qdrant is not running.")
-        self._client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
-        return self._client
-
-    def ensure_collection(self) -> None:
-        from qdrant_client.models import Distance, VectorParams
-        from ..local.vector_store import VECTOR_SIZE
-        client = self._get_client()
-        existing = [c.name for c in client.get_collections().collections]
-        if self.COLLECTION not in existing:
-            client.create_collection(
-                collection_name=self.COLLECTION,
-                vectors_config=VectorParams(
-                    size=VECTOR_SIZE,
-                    distance=Distance.COSINE,
-                ),
-            )
-
-    def upsert(self, points: list[tuple[str, list[float], dict]]) -> None:
-        if not points:
-            return
-        from qdrant_client.models import PointStruct
-        client = self._get_client()
-        self.ensure_collection()
-        qdrant_points = [
-            PointStruct(id=pid, vector=vec, payload=payload)
-            for pid, vec, payload in points
-        ]
-        client.upsert(collection_name=self.COLLECTION, points=qdrant_points)
-
-    def search(
-        self,
-        query_vector: list[float],
-        top_k: int = 5,
-        filters: Optional[dict] = None,
-    ) -> list[dict]:
-        from qdrant_client.models import Filter, FieldCondition, MatchValue
-        client = self._get_client()
-        qdrant_filter = None
-        if filters:
-            conditions = []
-            for key, value in filters.items():
-                conditions.append(
-                    FieldCondition(key=key, match=MatchValue(value=value))
-                )
-            if conditions:
-                qdrant_filter = Filter(must=conditions)
-        results = client.query_points(
-            collection_name=self.COLLECTION,
-            query=query_vector,
-            limit=top_k,
-            query_filter=qdrant_filter,
-            with_payload=True,
-        )
-        return [
-            {"score": hit.score, "payload": hit.payload or {}}
-            for hit in results.points
-        ]
-
-    def collection_info(self) -> Optional[dict]:
-        try:
-            client = self._get_client()
-            info = client.get_collection(self.COLLECTION)
-            return {"name": self.COLLECTION, "points_count": info.points_count}
-        except Exception:
-            return None

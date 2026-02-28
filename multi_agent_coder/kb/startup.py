@@ -77,8 +77,7 @@ class KBStartupManager:
     global_kb collection missing       → seed_all() (blocking, one-time)
     global_kb exists                   → Nothing
     No local index + blank project     → Nothing (RuntimeWatcher handles)
-    No local index + <= 50 files       → Full index+embed in background
-    No local index + > 50 files        → Warn user, suggest manual kb index
+    No local index + any files         → Full index+embed (blocking)
     0 files changed                    → Nothing (< 10ms)
     1-10 files changed                 → Incremental update in background
     11-50 files changed                → Incremental update in background
@@ -204,23 +203,15 @@ class KBStartupManager:
                 report.skipped_reason = "blank_project"
                 return
 
-            if file_count <= 50:
-                # Small project — index + embed silently in background
-                logger.info(
-                    "[KB] New project detected, indexing in background..."
-                )
-                self._run_background(self._full_index_and_embed, project_root, api_client)
-                report.local_index_triggered = True
-                report.background = True
-            else:
-                # Large project — warn user, don't block startup
-                logger.info(
-                    "[KB] Project has %d files but no KB index.\n"
-                    "     Run 'agentchanti kb index' to enable code intelligence.\n"
-                    "     (This is a one-time operation)",
-                    file_count,
-                )
-                report.skipped_reason = "large_project_needs_manual_index"
+            # Always index + embed at startup (synchronous, so KB is
+            # ready before the agent starts working).
+            logger.info(
+                "[KB] First run — indexing %d files and embedding...",
+                file_count,
+            )
+            self._safe_run(self._full_index_and_embed, project_root, api_client)
+            report.local_index_triggered = True
+            report.background = False
             return
 
         # CASE B: Index exists — check if stale

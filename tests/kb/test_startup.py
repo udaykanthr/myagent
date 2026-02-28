@@ -191,7 +191,7 @@ class TestStartupLocalKB:
         mgr._run_background.assert_not_called()
 
     def test_no_index_small_project(self):
-        """No index + <= 50 files → background full index."""
+        """No index + <= 50 files → synchronous full index."""
         mgr = self._make_manager(
             _read_graph_meta=MagicMock(return_value=None),
             _count_project_files=MagicMock(return_value=25),
@@ -200,14 +200,10 @@ class TestStartupLocalKB:
         mgr._check_local_kb("/tmp/project", report)
 
         assert report.local_index_triggered
-        assert report.background
-        mgr._run_background.assert_called_once()
-        # Verify the function called is _full_index_and_embed
-        args = mgr._run_background.call_args
-        assert args[0][0] == mgr._full_index_and_embed
+        assert not report.background  # now synchronous
 
     def test_no_index_exactly_50_files(self):
-        """No index + exactly 50 files → background full index (boundary)."""
+        """No index + exactly 50 files → synchronous full index."""
         mgr = self._make_manager(
             _read_graph_meta=MagicMock(return_value=None),
             _count_project_files=MagicMock(return_value=50),
@@ -216,10 +212,10 @@ class TestStartupLocalKB:
         mgr._check_local_kb("/tmp/project", report)
 
         assert report.local_index_triggered
-        assert report.background
+        assert not report.background  # now synchronous
 
     def test_no_index_large_project(self):
-        """No index + > 50 files → skip, reason='large_project_needs_manual_index'."""
+        """No index + > 50 files → synchronous full index (same as small)."""
         mgr = self._make_manager(
             _read_graph_meta=MagicMock(return_value=None),
             _count_project_files=MagicMock(return_value=200),
@@ -227,12 +223,11 @@ class TestStartupLocalKB:
         report = KBStartupReport()
         mgr._check_local_kb("/tmp/project", report)
 
-        assert report.skipped_reason == "large_project_needs_manual_index"
-        assert not report.local_index_triggered
-        mgr._run_background.assert_not_called()
+        assert report.local_index_triggered
+        assert not report.background  # synchronous
 
     def test_no_index_exactly_51_files(self):
-        """No index + 51 files → large project (boundary)."""
+        """No index + 51 files → synchronous full index (no size limit)."""
         mgr = self._make_manager(
             _read_graph_meta=MagicMock(return_value=None),
             _count_project_files=MagicMock(return_value=51),
@@ -240,7 +235,8 @@ class TestStartupLocalKB:
         report = KBStartupReport()
         mgr._check_local_kb("/tmp/project", report)
 
-        assert report.skipped_reason == "large_project_needs_manual_index"
+        assert report.local_index_triggered
+        assert not report.background  # synchronous
 
     # -- CASE B: Index exists, check staleness --
 
@@ -442,16 +438,15 @@ class TestStartupIntegration:
         self, mock_qr, mock_start, mock_gk, mock_seed,
         mock_meta, mock_files, mock_bg, capsys,
     ):
-        """Fresh install + small project → start qdrant, seed, index bg."""
+        """Fresh install + small project → start qdrant, seed, index (sync)."""
         report = KBStartupManager(vector_backend="qdrant").run("/tmp/project")
 
         assert report.qdrant_started
         assert report.global_kb_seeded
         assert report.local_index_triggered
-        assert report.background
+        assert not report.background  # synchronous now
         mock_start.assert_called_once()
         mock_seed.assert_called_once()
-        mock_bg.assert_called_once()
 
     @patch.object(KBStartupManager, "_run_background")
     @patch.object(KBStartupManager, "_count_project_files", return_value=200)
@@ -461,12 +456,11 @@ class TestStartupIntegration:
     def test_fresh_install_large_project(
         self, mock_qr, mock_gk, mock_meta, mock_files, mock_bg,
     ):
-        """Large project without index → warn but don't index."""
+        """Large project without index → synchronous full index (no longer skipped)."""
         report = KBStartupManager().run("/tmp/project")
 
-        assert report.skipped_reason == "large_project_needs_manual_index"
-        assert not report.local_index_triggered
-        mock_bg.assert_not_called()
+        assert report.local_index_triggered
+        assert not report.background  # synchronous now
 
     @patch.object(KBStartupManager, "_run_background")
     @patch.object(KBStartupManager, "_count_changed_files", return_value=0)

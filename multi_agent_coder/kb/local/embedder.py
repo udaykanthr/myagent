@@ -27,7 +27,6 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-EMBED_MODEL = "text-embedding-3-small"
 EMBED_DIMENSIONS = 1536
 BATCH_SIZE = 100
 MAX_RETRIES = 3
@@ -252,11 +251,11 @@ def _read_lines(abs_path: str, line_start: int, line_end: int) -> list[str]:
 # OpenAI embedding helpers
 # ---------------------------------------------------------------------------
 
-def _embed_single(client, text: str) -> list[float]:
+def _embed_single(client, text: str, embed_model: str | None) -> list[float]:
     """Embed a single text string with retries."""
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            vec = client.generate_embedding(text)
+            vec = client.generate_embedding(text, model=embed_model, dimensions=EMBED_DIMENSIONS)
             if vec:
                 return vec
             logger.warning("Embedding attempt %d returned empty vector", attempt)
@@ -273,7 +272,7 @@ def _embed_single(client, text: str) -> list[float]:
     return []
 
 
-def _embed_batch(client, texts: list[str]) -> list[list[float]]:
+def _embed_batch(client, texts: list[str], embed_model: str | None) -> list[list[float]]:
     """
     Embed a batch of texts via the OpenAI Embeddings API.
 
@@ -282,9 +281,11 @@ def _embed_batch(client, texts: list[str]) -> list[list[float]]:
     Parameters
     ----------
     client:
-        An ``openai.OpenAI`` client instance.
+        An LLM client instance.
     texts:
         List of text strings to embed.
+    embed_model:
+        Model name to use for embedding.
 
     Returns
     -------
@@ -296,26 +297,33 @@ def _embed_batch(client, texts: list[str]) -> list[list[float]]:
     RuntimeError
         If all retries are exhausted.
     """
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            response = client.embeddings.create(
-                model=EMBED_MODEL,
-                input=texts,
-            )
-            return [item.embedding for item in response.data]
-        except Exception as exc:
-            if attempt < MAX_RETRIES:
-                wait = 2 ** attempt
-                logger.warning(
-                    "Embedding API error (attempt %d/%d): %s — retrying in %ds",
-                    attempt, MAX_RETRIES, exc, wait,
-                )
-                time.sleep(wait)
-            else:
+    import concurrent.futures
+    vectors = []
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        # Submit all tasks
+        future_to_index = {
+            executor.submit(_embed_single, client, text, embed_model): i 
+            for i, text in enumerate(texts)
+        }
+        
+        # Initialize results list with empty lists
+        vectors = [[] for _ in range(len(texts))]
+        
+        # Collect results as they complete
+        for future in concurrent.futures.as_completed(future_to_index):
+            idx = future_to_index[future]
+            try:
+                vec = future.result()
+                if not vec:
+                    raise RuntimeError(f"Failed to generate embedding for text at index {idx}")
+                vectors[idx] = vec
+            except Exception as exc:
                 raise RuntimeError(
-                    f"Embedding API failed after {MAX_RETRIES} attempts: {exc}"
+                    f"Embedding API formatting failed for sequence {idx}: {exc}"
                 ) from exc
-    return []  # unreachable
+                
+    return vectors
 
 
 # ---------------------------------------------------------------------------
@@ -329,6 +337,7 @@ def embed_project(
     project_root: str,
     api_client,
     incremental: bool = False,
+    config_path: str | None = None,
 ) -> dict:
     """
     Embed all (or only changed) symbols and upsert them into *vector_store*.
@@ -347,12 +356,18 @@ def embed_project(
         The LLM client instance to use for embedding.
     incremental:
         If True, skip files whose hash matches their last_embedded_hash.
+    config_path:
+        Optional path to the .agentchanti.yaml configuration file.
 
     Returns
     -------
     dict
         Keys: total_symbols, embedded, skipped, errors.
     """
+    from ...config import Config
+    cfg = Config.load(config_path)
+    embed_model = cfg.EMBEDDING_MODEL or cfg.DEFAULT_MODEL
+
     try:
         from tqdm import tqdm  # type: ignore
         _tqdm = tqdm
@@ -400,7 +415,7 @@ def embed_project(
         texts = [c.text for c in batch]
 
         try:
-            vectors = _embed_batch(api_client, texts)
+            vectors = _embed_batch(api_client, texts, embed_model)
         except RuntimeError as exc:
             logger.warning("Skipping batch starting at %d: %s", batch_start, exc)
             error_count += len(batch)
@@ -468,6 +483,7 @@ def embed_file_symbols(
     vector_store,
     project_root: str,
     api_client,
+    config_path: str | None = None,
 ) -> None:
     """
     Re-embed only the symbols belonging to *file_path*.
@@ -488,7 +504,13 @@ def embed_file_symbols(
         Absolute path to the project root.
     api_client:
         The LLM client instance to use for embedding.
+    config_path:
+        Optional path to the .agentchanti.yaml configuration file.
     """
+    from ...config import Config
+    cfg = Config.load(config_path)
+    embed_model = cfg.EMBEDDING_MODEL or cfg.DEFAULT_MODEL
+
     all_chunks = extract_symbol_chunks(graph, project_root)
     file_chunks = [c for c in all_chunks if c.file_path == file_path]
 
@@ -498,7 +520,7 @@ def embed_file_symbols(
 
     texts = [c.text for c in file_chunks]
     try:
-        vectors = _embed_batch(api_client, texts)
+        vectors = _embed_batch(api_client, texts, embed_model)
     except RuntimeError as exc:
         logger.warning("Embedding failed for file %s: %s", file_path, exc)
         return

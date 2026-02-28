@@ -116,10 +116,15 @@ class OpenAIClient(LLMClient):
 
     # ── Embeddings ──
 
-    def generate_embedding(self, text: str, model: Optional[str] = None) -> List[float]:
+    def generate_embedding(self, text: str, model: Optional[str] = None, **kwargs) -> List[float]:
         embed_model = model or self.model
         url = f"{self.base_url}/embeddings"
         payload = {"model": embed_model, "input": text}
+        
+        dimensions = kwargs.get("dimensions")
+        if dimensions:
+            payload["dimensions"] = dimensions
+            
         try:
             response = requests.post(url, headers=self._headers(), json=payload)
             response.raise_for_status()

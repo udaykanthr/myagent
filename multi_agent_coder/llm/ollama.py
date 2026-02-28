@@ -99,7 +99,7 @@ class OllamaClient(LLMClient):
 
     # ── Embeddings (unchanged) ──
 
-    def generate_embedding(self, text: str, model: Optional[str] = None) -> List[float]:
+    def generate_embedding(self, text: str, model: Optional[str] = None, **kwargs) -> List[float]:
         embed_model = model or self.model
         url = f"{self._api_root}/api/embed"
         payload = {"model": embed_model, "input": text}

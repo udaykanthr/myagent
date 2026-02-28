@@ -259,6 +259,9 @@ def _cmd_embed(args: argparse.Namespace) -> None:
     from .local.manifest import Manifest
     from .local.vector_store import QdrantStore, is_qdrant_running
     from .local.embedder import embed_project
+    from ..config import Config
+    from ..llm.ollama import OllamaClient
+    from ..llm.lm_studio import LMStudioClient
 
     if not is_qdrant_running():
         print(
@@ -281,6 +284,48 @@ def _cmd_embed(args: argparse.Namespace) -> None:
     mode = "incremental" if incremental else "full"
     print(f"Embedding project symbols ({mode} mode): {project_root}")
 
+    # Initialize LLM Client
+    cfg = Config.load()
+    llm_kwargs = dict(
+        max_retries=cfg.LLM_MAX_RETRIES,
+        retry_delay=cfg.LLM_RETRY_DELAY,
+        stream=False,
+    )
+    provider = cfg.PROVIDER
+    model = cfg.EMBEDDING_MODEL or cfg.DEFAULT_MODEL
+    api_client = None
+
+    if provider == "ollama":
+        api_client = OllamaClient(
+            base_url=cfg.OLLAMA_BASE_URL, model=model, **llm_kwargs)
+    elif provider == "openai":
+        from ..llm.openai_client import OpenAIClient
+        if not cfg.OPENAI_API_KEY:
+             print("OPENAI_API_KEY is required for OpenAI provider in .agentchanti.yaml", file=sys.stderr)
+             sys.exit(1)
+        api_client = OpenAIClient(
+            base_url=cfg.OPENAI_BASE_URL, model=model,
+            api_key=cfg.OPENAI_API_KEY, **llm_kwargs)
+    elif provider == "gemini":
+        from ..llm.gemini_client import GeminiClient
+        if not cfg.GEMINI_API_KEY:
+             print("GEMINI_API_KEY is required for Gemini provider in .agentchanti.yaml", file=sys.stderr)
+             sys.exit(1)
+        api_client = GeminiClient(
+            base_url=cfg.GEMINI_BASE_URL, model=model,
+            api_key=cfg.GEMINI_API_KEY, **llm_kwargs)
+    elif provider == "anthropic":
+        from ..llm.anthropic_client import AnthropicClient
+        if not cfg.ANTHROPIC_API_KEY:
+             print("ANTHROPIC_API_KEY is required for Anthropic provider in .agentchanti.yaml", file=sys.stderr)
+             sys.exit(1)
+        api_client = AnthropicClient(
+            base_url=cfg.ANTHROPIC_BASE_URL, model=model,
+            api_key=cfg.ANTHROPIC_API_KEY, **llm_kwargs)
+    else:
+        api_client = LMStudioClient(
+            base_url=cfg.LM_STUDIO_BASE_URL, model=model, **llm_kwargs)
+
     import time as _time
     t0 = _time.perf_counter()
     summary = embed_project(
@@ -288,6 +333,7 @@ def _cmd_embed(args: argparse.Namespace) -> None:
         manifest=manifest,
         vector_store=vector_store,
         project_root=project_root,
+        api_client=api_client,
         incremental=incremental,
     )
     elapsed = _time.perf_counter() - t0

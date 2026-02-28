@@ -129,7 +129,7 @@ class GeminiClient(LLMClient):
         "snowflake-arctic-embed", "bge-large", "bge-small",
     }
 
-    def generate_embedding(self, text: str, model: Optional[str] = None) -> List[float]:
+    def generate_embedding(self, text: str, model: Optional[str] = None, **kwargs) -> List[float]:
         # Ignore local-only model names that aren't valid on the Gemini API
         if model and (model in self._LOCAL_ONLY_EMBED_MODELS
                       or not model.startswith(("text-embedding", "embedding-", "models/", "gemini-embedding"))):
@@ -147,6 +147,12 @@ class GeminiClient(LLMClient):
                 "parts": [{"text": text}]
             },
         }
+        
+        # Support specifying the embedding output dimension directly
+        dimensions = kwargs.get("dimensions")
+        if dimensions:
+            payload["outputDimensionality"] = dimensions
+
         try:
             response = requests.post(url, json=payload, timeout=(10, 60))
             response.raise_for_status()

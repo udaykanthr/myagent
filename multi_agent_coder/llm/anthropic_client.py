@@ -133,7 +133,7 @@ class AnthropicClient(LLMClient):
 
     # ── Embeddings ──
 
-    def generate_embedding(self, text: str, model: Optional[str] = None) -> List[float]:
+    def generate_embedding(self, text: str, model: Optional[str] = None, **kwargs) -> List[float]:
         log.warning(
             "[Anthropic] Anthropic does not provide an embedding API. "
             "Consider using a different provider (e.g. OpenAI or Gemini) for embeddings."

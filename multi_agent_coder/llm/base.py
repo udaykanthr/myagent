@@ -95,5 +95,5 @@ class LLMClient(ABC):
         periodically with the number of tokens generated so far."""
 
     @abstractmethod
-    def generate_embedding(self, text: str, model: Optional[str] = None) -> List[float]:
+    def generate_embedding(self, text: str, model: Optional[str] = None, **kwargs) -> List[float]:
         """Generate an embedding vector for the given text."""

@@ -45,3 +45,4 @@ Thumbs.db
 multi_agent_coder/kb/global_kb/core/errors.db
 
 .claude/
+*.pyc

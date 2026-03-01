@@ -191,13 +191,3 @@ graph TB
 | **P3** | `OCRPlugin` + `DocumentIntelligence` | Medium | Enterprise-grade document processing |
 
 ---
-
-## Next Steps
-
-Would you like me to:
-
-1. **Build the FastAPI wrapper** — Turn `run_task()` into a REST API with task queuing and status polling?
-2. **Implement specific plugins** — Start with Image Validation + Object Detection as `StepPlugin` subclasses?
-3. **Create the full multi-agent BE service** — Complete project with Docker Compose, task routing, and all services?
-
-Let me know which direction excites you most, and I'll create a detailed implementation plan.

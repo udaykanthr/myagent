@@ -228,6 +228,9 @@ def main():
         knowledge_base = KnowledgeBase(path=kb_path)
         log.info(f"Knowledge base loaded ({knowledge_base.size} entries)")
 
+    # ── 4c-bis. Import plan optimizer ──
+    from .plan_optimizer import optimize_plan
+
     # ── 4d. Init plugin registry ──
     plugin_registry = PluginRegistry()
     if cfg.PLUGINS:
@@ -265,9 +268,8 @@ def main():
             kb_context_builder = ContextBuilder(project_root=_os.getcwd())
             kb_runtime_watcher = RuntimeWatcher(
                 debounce_seconds=cfg.KB_WATCHER_DEBOUNCE_SECONDS,
-                api_client=llm_client,
             )
-            kb_runtime_watcher.start(project_root=_os.getcwd())
+            kb_runtime_watcher.start(project_root=_os.getcwd(), api_client=llm_client)
             log.info("[KB] Context builder and runtime watcher initialised")
         except Exception as kb_exc:
             log.warning(f"[KB] Initialisation failed (non-fatal): {kb_exc}")
@@ -401,7 +403,7 @@ def main():
                 log.warning("Failed to create git checkpoint branch")
 
         # ── 9. Plan ──
-        display.show_status("Requesting steps from planner...")
+        display.show_status("Analyzing task and mapping relevant files...")
         log.info("Planning...")
 
         planner_context = ""
@@ -414,6 +416,17 @@ def main():
             if kb_context:
                 planner_context += f"\n\n{kb_context}"
                 log.info(f"Injected {knowledge_base.size} knowledge entries into planner")
+
+        # Pre-analysis: map relevant files, classify intent, enrich context
+        analysis_context = planner.pre_analyze(
+            args.task,
+            source_files=source_files,
+            kb_context_builder=kb_context_builder,
+            knowledge_base=knowledge_base,
+        )
+        if analysis_context:
+            planner_context = analysis_context + "\n\n" + planner_context
+            log.info("[Planning] Pre-analysis context injected")
 
         MAX_PLAN_RETRIES = 3
         plan = None
@@ -461,6 +474,12 @@ def main():
 
         steps, dependencies = executor.parse_step_dependencies(raw_steps)
 
+        # ── 10b. Post-plan optimization ──
+        pre_opt_count = len(steps)
+        steps, dependencies = optimize_plan(steps, knowledge_base=knowledge_base)
+        if len(steps) < pre_opt_count:
+            log.info(f"[Planning] Optimized: {pre_opt_count} → {len(steps)} steps")
+
         # ── 11. Plan approval loop ──
         if args.auto:
             log.info(f"Auto-approved {len(steps)} steps (--auto mode)")
@@ -481,6 +500,7 @@ def main():
                     print("\n  [ERROR] Could not parse re-plan steps.\n")
                     return
                 steps, dependencies = executor.parse_step_dependencies(raw_steps)
+                steps, dependencies = optimize_plan(steps, knowledge_base=knowledge_base)
             elif action == "edit" and edited_steps:
                 steps = edited_steps
                 _, dependencies = executor.parse_step_dependencies(steps)

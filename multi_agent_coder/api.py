@@ -217,9 +217,8 @@ def _run_task_impl(
             kb_context_builder = ContextBuilder(project_root=os.getcwd())
             kb_runtime_watcher = RuntimeWatcher(
                 debounce_seconds=cfg.KB_WATCHER_DEBOUNCE_SECONDS,
-                api_client=llm_client,
             )
-            kb_runtime_watcher.start(project_root=os.getcwd())
+            kb_runtime_watcher.start(project_root=os.getcwd(), api_client=llm_client)
             _logger.info("[KB] Context builder and runtime watcher initialised")
         except Exception as kb_exc:
             _logger.warning("[KB] Initialisation failed (non-fatal): %s", kb_exc)
@@ -256,14 +255,46 @@ def _run_task_impl(
     if source_files:
         memory.update(source_files)
 
-    # Plan
+    # Knowledge base
+    knowledge_base = None
+    try:
+        from .knowledge import KnowledgeBase
+        kb_path = os.path.join(cfg.EMBEDDING_CACHE_DIR, "knowledge.json")
+        knowledge_base = KnowledgeBase(path=kb_path)
+        if project_profile is not None:
+            knowledge_base.update_tech_stack(project_profile)
+    except Exception:
+        pass
+
+    # Pre-analysis: map relevant files, classify intent, enrich context
     planner_context = f"Existing project:\n{project_context}" if project_context else ""
+
+    if knowledge_base and knowledge_base.size > 0:
+        kb_ctx = knowledge_base.format_for_planner()
+        if kb_ctx:
+            planner_context += f"\n\n{kb_ctx}"
+
+    analysis_context = planner.pre_analyze(
+        task,
+        source_files=source_files,
+        kb_context_builder=kb_context_builder,
+        knowledge_base=knowledge_base,
+    )
+    if analysis_context:
+        planner_context = analysis_context + "\n\n" + planner_context
+
+    # Plan
     plan = planner.process(task, context=planner_context)
     raw_steps = executor.parse_plan_steps(plan)
     if not raw_steps:
         return TaskResult(success=False, error="Could not parse any steps from the plan.")
 
     steps, dependencies = executor.parse_step_dependencies(raw_steps)
+
+    # Post-plan optimization
+    from .orchestrator.plan_optimizer import optimize_plan
+    steps, dependencies = optimize_plan(steps, knowledge_base=knowledge_base)
+
     display.set_steps(steps)
 
     # Execute
@@ -324,6 +355,13 @@ def _run_task_impl(
 
     if pipeline_success:
         clear_checkpoint(checkpoint_file)
+        # Extract knowledge from successful run
+        if knowledge_base is not None:
+            try:
+                knowledge_base.extract_from_run(
+                    task, steps, memory.as_dict(), llm_client)
+            except Exception:
+                pass
 
     # Collect written files (exclude internal cmd/fix outputs)
     files_written = [f for f in memory.all_files().keys()

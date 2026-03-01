@@ -56,11 +56,29 @@ class Executor:
 
         return True, ""
 
+    # Section headers that signal the end of the actual plan.
+    # LLMs often append "Related Test Cases", "Notes", etc. sections
+    # with their own numbered items that should NOT be parsed as steps.
+    _PLAN_SECTION_BOUNDARY = re.compile(
+        r'^\s*(?:'
+        r'#{1,4}\s+(?:Related|Test\s+Case|Note|Example|Appendix|Reference|Detail|Explanation)'
+        r'|\*{2}Test\s+Case'
+        r'|---+\s*$'            # horizontal rule
+        r'|===+\s*$'            # double horizontal rule
+        r')',
+        re.IGNORECASE,
+    )
+
     @staticmethod
     def parse_plan_steps(plan_text: str) -> List[str]:
         """
         Splits a numbered plan into individual step strings using
         simple string manipulation.
+
+        Stops parsing when a section boundary is detected (e.g.
+        ``### Related Test Cases``) to avoid capturing LLM-generated
+        pseudo-code sub-items as real plan steps.
+
         Input:
             1. Check python env
             2. Create calculator.py
@@ -68,9 +86,17 @@ class Executor:
         Output: ["Check python env", "Create calculator.py", "Write tests"]
         """
         steps = []
+        plan_ended = False
         # Match lines starting with a number followed by a dot
         pattern = r"^\s*\d+\.\s*(.*)"
         for line in plan_text.splitlines():
+            # Check for section boundary — stop parsing numbered items
+            if Executor._PLAN_SECTION_BOUNDARY.match(line):
+                plan_ended = True
+
+            if plan_ended:
+                continue
+
             match = re.match(pattern, line)
             if match:
                 step_text = match.group(1).strip()

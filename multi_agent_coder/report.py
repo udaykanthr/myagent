@@ -18,6 +18,13 @@ class StepReport:
     diffs: list[str] = field(default_factory=list)
     tokens_sent: int = 0
     tokens_recv: int = 0
+    duration: float = 0.0
+
+def _format_duration(seconds: float) -> str:
+    if seconds <= 0:
+        return ""
+    mins, secs = divmod(int(seconds), 60)
+    return f"{mins}m {secs}s" if mins else f"{secs}s"
 
 
 _STATUS_COLORS = {
@@ -81,6 +88,8 @@ def generate_html_report(
     # dashboard totals; fall back to summing per-step values.
     total_sent = token_usage.get("sent", 0) or sum(s.tokens_sent for s in steps)
     total_recv = token_usage.get("recv", 0) or sum(s.tokens_recv for s in steps)
+    total_time = token_usage.get("total_time", 0.0)
+    total_time_str = _format_duration(total_time) if total_time > 0 else "0s"
 
     # Build step HTML
     steps_html = ""
@@ -99,6 +108,7 @@ def generate_html_report(
                 <span class="step-type">[{_escape(step.step_type)}]</span>
                 <span class="step-text">{_escape(step.text)}</span>
                 <span class="step-tokens">{step.tokens_sent + step.tokens_recv} tokens</span>
+                {f'<span class="step-time" style="color: var(--muted); font-size: 0.75rem; margin-left: 10px;">{_format_duration(step.duration)}</span>' if step.duration > 0 else ''}
             </div>
             {diffs_html}
         </div>
@@ -190,6 +200,10 @@ def generate_html_report(
     <div class="stat">
       <div class="stat-value">{total_recv:,}</div>
       <div class="stat-label">Received</div>
+    </div>
+    <div class="stat">
+      <div class="stat-value">{total_time_str}</div>
+      <div class="stat-label">Total Time</div>
     </div>
     {f'''<div class="stat">
       <div class="stat-value" style="color: var(--accent);">${token_usage.get("cost", 0.0):.4f}</div>

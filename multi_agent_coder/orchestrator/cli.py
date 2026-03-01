@@ -4,6 +4,7 @@ CLI entry point — argument parsing and main execution flow.
 
 import argparse
 import sys
+import time
 
 from ..config import Config
 from ..llm.ollama import OllamaClient
@@ -631,6 +632,7 @@ def main():
             tokens = ds.get("tokens", {})
             sr.tokens_sent = tokens.get("sent", 0)
             sr.tokens_recv = tokens.get("recv", 0)
+            sr.duration = ds.get("duration", 0.0)
 
     # ── 15. Finish ──
     if pipeline_success:
@@ -656,6 +658,7 @@ def main():
                     "recv": token_tracker.total_completion_tokens,
                     "total": token_tracker.total_tokens,
                     "cost": token_tracker.total_cost,
+                    "total_time": time.monotonic() - display.start_time,
                 }
                 report_path = generate_html_report(
                     args.task, step_reports, token_usage,
@@ -691,6 +694,7 @@ def main():
                     "recv": token_tracker.total_completion_tokens,
                     "total": token_tracker.total_tokens,
                     "cost": token_tracker.total_cost,
+                    "total_time": time.monotonic() - display.start_time,
                 }
                 report_path = generate_html_report(
                     args.task, step_reports, token_usage,

@@ -19,11 +19,13 @@ class TokenTracker:
         self.total_cost = 0.0
         self.call_count = 0
         self.pricing = pricing or {}
+        self.current_context_size = 0
 
     def record(self, prompt_tokens: int, completion_tokens: int, model_name: str | None = None):
         self.total_prompt_tokens += prompt_tokens
         self.total_completion_tokens += completion_tokens
         self.call_count += 1
+        self.current_context_size = prompt_tokens
         
         if model_name:
             self._calculate_cost(model_name, prompt_tokens, completion_tokens)
@@ -110,6 +112,7 @@ class CLIDisplay:
         self._spinner_thread: threading.Thread | None = None
         self._spinner_stop = threading.Event()
         self._spinner_message: str = ""
+        self.start_time = _time.monotonic()
 
     def _refresh_size(self):
         size = shutil.get_terminal_size((80, 24))
@@ -396,7 +399,16 @@ class CLIDisplay:
         # Build the two parts
         progress = self._progress_bar_compact()
 
-        right = (f"{D}↑{R}{W}{t.total_prompt_tokens:,}{R} "
+        ctx = t.current_context_size
+        ctx_str = f"{ctx/1000:.1f}K".replace(".0K", "K") if ctx >= 1000 else str(ctx)
+        
+        elapsed = _time.monotonic() - self.start_time
+        mins, secs = divmod(int(elapsed), 60)
+        time_str = f"{mins}:{secs:02d}" if mins else f"{secs}s"
+
+        right = (f"{D}⏱ {R}{W}{time_str}{R} "
+                 f"{D}Ctx:{R}{W}{ctx_str}{R} "
+                 f"{D}↑{R}{W}{t.total_prompt_tokens:,}{R} "
                  f"{D}↓{R}{W}{t.total_completion_tokens:,}{R} "
                  f"{D}Σ{R}{C}{t.total_tokens:,}{R} "
                  f"{D}{t.call_count} calls{R}")
@@ -447,6 +459,12 @@ class CLIDisplay:
                 sc = {"active": Y, "done": G, "failed": RED,
                       "skipped": D}.get(status, D)
                 status_text = f" {sc}{status}{R}"
+
+                if status in ("done", "failed") and "duration" in step:
+                    dur = step["duration"]
+                    m, s = divmod(int(dur), 60)
+                    dur_str = f" {m}:{s:02d}" if m else f" {int(s)}s"
+                    status_text += f"{D}{dur_str}{R}"
 
             lines.append(f"{prefix} {icon} {name_color}{label}{R}{status_text}")
         return lines
@@ -593,6 +611,7 @@ class CLIDisplay:
         self.steps[index]["type"] = step_type
         self.steps[index]["info"] = []
         self.steps[index]["tokens"] = {"sent": 0, "recv": 0}
+        self.steps[index]["start_time"] = _time.monotonic()
         self.render()
 
     def step_info(self, index: int, message: str):
@@ -626,6 +645,9 @@ class CLIDisplay:
         """Mark step as done/failed/skipped."""
         self._stop_spinner()
         self.steps[index]["status"] = status
+        if "start_time" in self.steps[index]:
+            duration = _time.monotonic() - self.steps[index]["start_time"]
+            self.steps[index]["duration"] = duration
         self.render()
 
     def finish(self, success: bool = True):

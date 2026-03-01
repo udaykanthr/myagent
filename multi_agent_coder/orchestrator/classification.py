@@ -11,7 +11,7 @@ def _classify_step(step_text: str, llm_client, display: CLIDisplay, step_idx: in
     display.step_info(step_idx, "Classifying step...")
     prompt = (
         "Classify the following task step into exactly one category.\n"
-        "Reply with ONLY one word: CMD, CODE, TEST, or IGNORE\n\n"
+        "Reply with ONLY one word: CMD, CODE, TEST, SEARCH, or IGNORE\n\n"
         "  CMD    = anything that can be done by running shell commands, including:\n"
         "           - scanning or listing files/directories (ls, tree, find, dir)\n"
         "           - reading or inspecting file contents (cat, type, head)\n"
@@ -21,6 +21,8 @@ def _classify_step(step_text: str, llm_client, display: CLIDisplay, step_idx: in
         "           - navigating or exploring a codebase\n\n"
         "  CODE   = create or modify source code files (writing new code or editing existing files)\n\n"
         "  TEST   = write or run unit/integration tests\n\n"
+        "  SEARCH = search the web for documentation, API references, error solutions,\n"
+        "           or latest framework / library information\n\n"
         "  IGNORE = not actionable by a program (e.g. open an IDE, review code visually,\n"
         "           think about architecture, make a decision)\n\n"
         f"Step: {step_text}\n\n"
@@ -35,7 +37,7 @@ def _classify_step(step_text: str, llm_client, display: CLIDisplay, step_idx: in
     recv_delta = token_tracker.total_completion_tokens - recv_before
     display.step_tokens(step_idx, sent_delta, recv_delta)
 
-    for keyword in ("IGNORE", "CMD", "CODE", "TEST"):
+    for keyword in ("IGNORE", "CMD", "CODE", "TEST", "SEARCH"):
         if keyword in response:
             return keyword
     return "CODE"

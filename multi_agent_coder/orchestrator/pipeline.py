@@ -13,6 +13,7 @@ from .memory import FileMemory
 from .classification import _classify_step
 from .step_handlers import (
     _handle_cmd_step, _handle_code_step, _handle_test_step,
+    _handle_search_step,
     MAX_STEP_RETRIES,
 )
 from .diagnosis import _diagnose_failure, _apply_fix
@@ -262,6 +263,12 @@ def _execute_step(step_idx: int, step_text: str, *,
                 step_text, tester, coder, reviewer, executor,
                 task, memory, display, step_idx, language=language,
                 auto=auto, search_agent=search_agent)
+            display.complete_step(step_idx, "done" if success else "failed")
+
+        elif step_type == "SEARCH":
+            success, error_info = _handle_search_step(
+                step_text, search_agent, memory, display, step_idx,
+                language=language)
             display.complete_step(step_idx, "done" if success else "failed")
 
         else:

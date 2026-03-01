@@ -716,6 +716,45 @@ def _prefix_subproject_paths(files: dict[str, str],
     return corrected
 
 
+def _handle_search_step(step_text: str, search_agent,
+                        memory: FileMemory, display: CLIDisplay,
+                        step_idx: int,
+                        language: str | None = None) -> tuple[bool, str]:
+    """Handle a [SEARCH] step — search the web for documentation / info.
+
+    Results are stored in memory under ``_search_context/step_N.txt`` so
+    that subsequent CODE / CMD steps can reference them.  The step is always
+    considered successful (best-effort, non-blocking).
+    """
+    if search_agent is None:
+        display.step_info(step_idx, "Search agent not available, skipping.")
+        log.warning(f"Step {step_idx+1}: SEARCH step but no search_agent configured.")
+        return True, ""
+
+    display.step_info(step_idx, f"Searching: {step_text[:80]}...")
+    log.info(f"Step {step_idx+1}: SEARCH — {step_text}")
+
+    try:
+        result = search_agent.search_for_task(step_text, language=language)
+    except Exception as exc:
+        log.warning(f"Step {step_idx+1}: Search failed: {exc}")
+        display.step_info(step_idx, "Search failed (non-blocking), continuing.")
+        return True, ""
+
+    if result:
+        # Store in memory so downstream steps see the search context
+        memory.update({
+            f"_search_context/step_{step_idx+1}.txt": result,
+        })
+        display.step_info(step_idx, "Search results stored for downstream steps.")
+        log.info(f"Step {step_idx+1}: Search returned {len(result)} chars of context.")
+    else:
+        display.step_info(step_idx, "No relevant results found.")
+        log.info(f"Step {step_idx+1}: Search returned no results.")
+
+    return True, ""
+
+
 def _handle_cmd_step(step_text: str, executor: Executor,
                      llm_client, memory: FileMemory,
                      display: CLIDisplay, step_idx: int,

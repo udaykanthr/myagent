@@ -668,43 +668,24 @@ def _find_scope(
 # Main public parse function
 # ---------------------------------------------------------------------------
 
-def parse_file(file_path: str) -> ParsedFile:
+def parse_code(source_bytes: bytes, language: str, file_path: str = "") -> ParsedFile:
     """
-    Parse a single source file and return all structural information.
-
-    Handles parse errors gracefully: on failure, returns a ParsedFile with
-    `parse_error` set and empty symbol lists so callers can skip or log.
-
+    Parse raw code bytes and return structural information.
+    
     Parameters
     ----------
+    source_bytes:
+        Raw bytes of the source code.
+    language:
+        The tree-sitter language name natively supported (e.g., 'python', 'javascript').
     file_path:
-        Absolute or relative path to the source file.
+        Optional file path to associate with the parsed results.
 
     Returns
     -------
     ParsedFile
         Populated with functions, classes, variables, imports, and call sites.
     """
-    language = detect_language(file_path)
-    if language is None:
-        return ParsedFile(
-            path=file_path,
-            language="unknown",
-            hash="",
-            parse_error="Unsupported file extension",
-        )
-
-    try:
-        with open(file_path, "rb") as fh:
-            source_bytes = fh.read()
-    except OSError as exc:
-        return ParsedFile(
-            path=file_path,
-            language=language,
-            hash="",
-            parse_error=f"Cannot read file: {exc}",
-        )
-
     file_hash = hashlib.sha256(source_bytes).hexdigest()
 
     ts_parser = _get_ts_parser(language)
@@ -843,6 +824,45 @@ def parse_file(file_path: str) -> ParsedFile:
             ))
 
     return result
+
+def parse_file(file_path: str) -> ParsedFile:
+    """
+    Parse a single source file and return all structural information.
+
+    Handles parse errors gracefully: on failure, returns a ParsedFile with
+    `parse_error` set and empty symbol lists so callers can skip or log.
+
+    Parameters
+    ----------
+    file_path:
+        Absolute or relative path to the source file.
+
+    Returns
+    -------
+    ParsedFile
+        Populated with functions, classes, variables, imports, and call sites.
+    """
+    language = detect_language(file_path)
+    if language is None:
+        return ParsedFile(
+            path=file_path,
+            language="unknown",
+            hash="",
+            parse_error="Unsupported file extension",
+        )
+
+    try:
+        with open(file_path, "rb") as fh:
+            source_bytes = fh.read()
+    except OSError as exc:
+        return ParsedFile(
+            path=file_path,
+            language=language,
+            hash="",
+            parse_error=f"Cannot read file: {exc}",
+        )
+
+    return parse_code(source_bytes, language, file_path)
 
 
 # ---------------------------------------------------------------------------

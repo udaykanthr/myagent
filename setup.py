@@ -10,6 +10,7 @@ setup(
         "textual",
         # Phase 1 — Code Graph (Local KB)
         "networkx>=3.0",
+        "syntax_checker",
         "tree-sitter>=0.22",
         "tree-sitter-python",
         "tree-sitter-javascript",

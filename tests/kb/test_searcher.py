@@ -183,13 +183,14 @@ class TestGraphKeywordSearch:
 # ---------------------------------------------------------------------------
 
 class TestSearcher:
-    def _make_searcher(self, tmp_path, qdrant_running=True):
+    def _make_searcher(self, tmp_path):
         from multi_agent_coder.kb.local.searcher import Searcher
-        from multi_agent_coder.kb.local.vector_store import QdrantStore
+        from multi_agent_coder.kb.local.sqlite_vector_store import SQLiteVectorStore
 
         g = _make_graph()
         m = _make_manifest(tmp_path)
-        vs = MagicMock(spec=QdrantStore)
+        vs = MagicMock(spec=SQLiteVectorStore)
+        vs.collection_info.return_value = {"points_count": 1}
         vs.search.return_value = [
             {
                 "score": 0.93,
@@ -217,8 +218,6 @@ class TestSearcher:
         searcher, vs = self._make_searcher(tmp_path)
 
         with patch(
-            "multi_agent_coder.kb.local.searcher.is_qdrant_running", return_value=True
-        ), patch(
             "multi_agent_coder.kb.local.searcher._embed_query",
             return_value=[0.1] * 1536,
         ):
@@ -228,14 +227,15 @@ class TestSearcher:
         assert results[0].symbol_name == "login"
         assert results[0].score == pytest.approx(0.93)
 
-    def test_search_falls_back_when_qdrant_down(self, tmp_path):
+    def test_search_falls_back_when_store_empty(self, tmp_path):
         from multi_agent_coder.kb.local.searcher import Searcher
 
         searcher, vs = self._make_searcher(tmp_path)
 
-        with patch(
-            "multi_agent_coder.kb.local.searcher.is_qdrant_running", return_value=False
-        ):
+        vs.collection_info.return_value = {"points_count": 0}
+
+        # No embedding mock needed, it will fall back earlier
+        with patch("multi_agent_coder.kb.local.searcher._embed_query") as mock_embed:
             results = searcher.search("authentication login", top_k=10)
 
         # Fallback returns graph keyword results
@@ -245,11 +245,12 @@ class TestSearcher:
 
     def test_search_deduplicates_results(self, tmp_path):
         from multi_agent_coder.kb.local.searcher import Searcher
-        from multi_agent_coder.kb.local.vector_store import QdrantStore
+        from multi_agent_coder.kb.local.sqlite_vector_store import SQLiteVectorStore
 
         g = _make_graph()
         m = _make_manifest(tmp_path)
-        vs = MagicMock(spec=QdrantStore)
+        vs = MagicMock(spec=SQLiteVectorStore)
+        vs.collection_info.return_value = {"points_count": 1}
 
         # Duplicate result in Qdrant response
         hit = {
@@ -268,8 +269,6 @@ class TestSearcher:
         searcher = Searcher(g, m, vs, str(tmp_path))
 
         with patch(
-            "multi_agent_coder.kb.local.searcher.is_qdrant_running", return_value=True
-        ), patch(
             "multi_agent_coder.kb.local.searcher._embed_query",
             return_value=[0.1] * 1536,
         ):
@@ -280,11 +279,12 @@ class TestSearcher:
 
     def test_search_applies_file_filter(self, tmp_path):
         from multi_agent_coder.kb.local.searcher import Searcher
-        from multi_agent_coder.kb.local.vector_store import QdrantStore
+        from multi_agent_coder.kb.local.sqlite_vector_store import SQLiteVectorStore
 
         g = _make_graph()
         m = _make_manifest(tmp_path)
-        vs = MagicMock(spec=QdrantStore)
+        vs = MagicMock(spec=SQLiteVectorStore)
+        vs.collection_info.return_value = {"points_count": 1}
 
         # Result in wrong file
         vs.search.return_value = [
@@ -304,8 +304,6 @@ class TestSearcher:
         searcher = Searcher(g, m, vs, str(tmp_path))
 
         with patch(
-            "multi_agent_coder.kb.local.searcher.is_qdrant_running", return_value=True
-        ), patch(
             "multi_agent_coder.kb.local.searcher._embed_query",
             return_value=[0.1] * 1536,
         ):
@@ -318,11 +316,12 @@ class TestSearcher:
 
     def test_search_related_symbols_populated(self, tmp_path):
         from multi_agent_coder.kb.local.searcher import Searcher
-        from multi_agent_coder.kb.local.vector_store import QdrantStore
+        from multi_agent_coder.kb.local.sqlite_vector_store import SQLiteVectorStore
 
         g = _make_graph()
         m = _make_manifest(tmp_path)
-        vs = MagicMock(spec=QdrantStore)
+        vs = MagicMock(spec=SQLiteVectorStore)
+        vs.collection_info.return_value = {"points_count": 1}
         vs.search.return_value = [
             {
                 "score": 0.9,
@@ -340,8 +339,6 @@ class TestSearcher:
         searcher = Searcher(g, m, vs, str(tmp_path))
 
         with patch(
-            "multi_agent_coder.kb.local.searcher.is_qdrant_running", return_value=True
-        ), patch(
             "multi_agent_coder.kb.local.searcher._embed_query",
             return_value=[0.1] * 1536,
         ):

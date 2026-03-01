@@ -56,7 +56,7 @@ class SymbolChunk:
     # Embedding text
     text: str
 
-    # Point ID for Qdrant (deterministic UUID)
+    # Point ID for vector store (deterministic UUID)
     point_id: str
 
 
@@ -112,7 +112,7 @@ def _class_text(
 
 
 # ---------------------------------------------------------------------------
-# Deterministic UUID for idempotent Qdrant upserts
+# Deterministic UUID for idempotent vector store upserts
 # ---------------------------------------------------------------------------
 
 def make_point_id(file_path: str, symbol_name: str, line_start: int) -> str:
@@ -300,7 +300,12 @@ def _embed_batch(client, texts: list[str], embed_model: str | None) -> list[list
     import concurrent.futures
     vectors = []
     
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+    # Local LLMs (Ollama, LM Studio) severely degrade in performance when hit
+    # with concurrent requests due to KV cache thrashing. Cloud APIs can handle it.
+    client_type = type(client).__name__
+    max_workers = 1 if client_type in ("OllamaClient", "LMStudioClient") else 5
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Submit all tasks
         future_to_index = {
             executor.submit(_embed_single, client, text, embed_model): i 
@@ -349,7 +354,7 @@ def embed_project(
     manifest:
         Loaded manifest instance.
     vector_store:
-        A :class:`~agentchanti.kb.local.vector_store.QdrantStore` instance.
+        A :class:`~agentchanti.kb.local.sqlite_vector_store.SQLiteVectorStore` instance.
     project_root:
         Absolute path to the project root.
     api_client:
@@ -421,7 +426,7 @@ def embed_project(
             error_count += len(batch)
             continue
 
-        # Build Qdrant points
+        # Build vector store points
         import datetime
         points = []
         for chunk, vector in zip(batch, vectors):
@@ -457,7 +462,7 @@ def embed_project(
             if _tqdm and hasattr(iterator, "set_postfix"):
                 iterator.set_postfix({"embedded": embedded_count})
         except Exception as exc:
-            logger.warning("Qdrant upsert failed for batch: %s", exc)
+            logger.warning("Vector store upsert failed for batch: %s", exc)
             error_count += len(batch)
 
     # After embedding, update last_embedded_hash for each file in batch
@@ -499,7 +504,7 @@ def embed_file_symbols(
     manifest:
         Manifest instance.
     vector_store:
-        Qdrant store instance.
+        Vector store instance.
     project_root:
         Absolute path to the project root.
     api_client:
@@ -558,4 +563,4 @@ def embed_file_symbols(
             manifest.set_embedded_hash(file_path, record.hash)
         logger.info("[embedder] Re-embedded %d symbols for %s", len(points), file_path)
     except Exception as exc:
-        logger.warning("[embedder] Qdrant upsert failed for %s: %s", file_path, exc)
+        logger.warning("[embedder] Vector store upsert failed for %s: %s", file_path, exc)

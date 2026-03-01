@@ -118,26 +118,6 @@ class TestCreateVectorStore(unittest.TestCase):
         self.assertIsInstance(store, SQLiteVectorStore)
         store.close()
 
-    def test_qdrant_backend_returns_valid_store(self):
-        """Factory with qdrant backend should return a valid vector store.
-        
-        If Qdrant is running, returns QdrantStore; otherwise falls back to
-        SQLiteVectorStore. Either is acceptable.
-        """
-        from multi_agent_coder.kb.local.sqlite_vector_store import (
-            create_vector_store,
-            SQLiteVectorStore,
-        )
-        tmpdir = tempfile.mkdtemp()
-        store = create_vector_store(tmpdir, backend="qdrant")
-        # Should have core methods regardless of which store was created
-        self.assertTrue(hasattr(store, "search"))
-        self.assertTrue(hasattr(store, "upsert"))
-        self.assertTrue(hasattr(store, "collection_info"))
-        if hasattr(store, "close"):
-            store.close()
-
-
 # ---------------------------------------------------------------------------
 # Test: ContextBuilder.get_relevant_files
 # ---------------------------------------------------------------------------

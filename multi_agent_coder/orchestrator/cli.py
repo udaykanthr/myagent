@@ -259,7 +259,7 @@ def main():
             from ..kb.context_builder import ContextBuilder
             from ..kb.runtime_watcher import RuntimeWatcher
 
-            # Smart startup check — handles Qdrant, global KB, local KB
+            # Smart startup check — handles global KB, local KB
             KBStartupManager().run(project_root=_os.getcwd(), api_client=llm_client)
 
             kb_context_builder = ContextBuilder(project_root=_os.getcwd())

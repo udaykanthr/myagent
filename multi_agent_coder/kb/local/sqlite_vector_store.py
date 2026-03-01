@@ -1,13 +1,11 @@
 """
 SQLite-backed local vector store for the Local Knowledge Base.
 
-Zero-config replacement for Qdrant — stores embedding vectors in SQLite
-and computes cosine similarity using numpy.  No Docker, no external
-services required.
+Stores embedding vectors in SQLite and computes cosine similarity
+using numpy.  Zero-config — no Docker, no external services required.
 
-Interface is duck-type compatible with :class:`QdrantStore` so the rest
-of the KB stack (embedder, searcher, context_builder) can use either
-store interchangeably.
+The KB stack (embedder, searcher, context_builder) all use this store
+for vector operations.
 
 Storage: ``.agentchanti/kb/local/vectors.db``
 """
@@ -102,7 +100,7 @@ def _cosine_similarity_single(a: list[float], b: list[float]) -> float:
 class SQLiteVectorStore:
     """Local vector store backed by SQLite + numpy cosine similarity.
 
-    Drop-in replacement for :class:`QdrantStore`.  No Docker required.
+    Zero-config vector store — no Docker or external services required.
 
     Parameters
     ----------
@@ -163,7 +161,7 @@ class SQLiteVectorStore:
             self._conn = None
 
     # ------------------------------------------------------------------
-    # QdrantStore-compatible API
+    # Public API
     # ------------------------------------------------------------------
 
     def ensure_collection(self) -> None:
@@ -344,32 +342,18 @@ class SQLiteVectorStore:
 def create_vector_store(
     project_root: str,
     backend: str = "local",
-) -> "SQLiteVectorStore | Any":
-    """Create the appropriate vector store based on *backend*.
+) -> SQLiteVectorStore:
+    """Create the local vector store.
 
     Parameters
     ----------
     project_root:
         Absolute path to the project root.
     backend:
-        ``"local"`` (default) or ``"qdrant"``.
+        Kept for backward compatibility. Always uses SQLite.
 
     Returns
     -------
-    SQLiteVectorStore or QdrantStore
+    SQLiteVectorStore
     """
-    if backend == "qdrant":
-        try:
-            from .vector_store import QdrantStore, is_qdrant_running
-
-            if is_qdrant_running():
-                return QdrantStore(project_root)
-            logger.warning(
-                "[KB] Qdrant not running, falling back to local SQLite store"
-            )
-        except Exception as exc:
-            logger.warning(
-                "[KB] Qdrant unavailable (%s), falling back to local SQLite store",
-                exc,
-            )
     return SQLiteVectorStore(project_root)

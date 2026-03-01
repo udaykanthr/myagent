@@ -433,7 +433,7 @@ plugins:
 
 - **Python 3.10+** ([python.org](https://www.python.org/downloads/))
 - **Git** ([git-scm.com](https://git-scm.com/))
-- **Docker** ([docs.docker.com/get-docker](https://docs.docker.com/get-docker/)) — required for the Knowledge Base semantic layer. AgentChanti runs a [Qdrant](https://qdrant.tech/) vector database container (`agentchanti-qdrant`) on port 6333 for embedding-based code search. Docker must be installed and in PATH. Vector data persists in `.agentchanti/kb/local/qdrant/`.
+
 - A local LLM server **or** a cloud API key (see providers below)
 
 AgentChanti supports five LLM providers. Choose one or configure multiple.
@@ -587,7 +587,7 @@ A four-phase system that provides context to agents:
 - **Runtime Watcher** — Monitors file changes during execution and triggers incremental indexing
 - **Startup Manager** — Smart initialization with < 10ms target for common case
 
-**Docker requirement:** The semantic layer (Phase 2) uses a Qdrant vector DB running in Docker. Manage it with `agentchanti kb qdrant start|stop|status`.
+**Embedding:** The semantic layer (Phase 2) uses a local SQLite vector store for embeddings. No external services required.
 
 ### KB CLI Commands
 
@@ -613,11 +613,9 @@ agentchanti kb <command> [options]
 
 | Command | Description | Options |
 |---------|-------------|---------|
-| `kb embed` | Embed project symbols into Qdrant | `--incremental` — only embed changed symbols |
+| `kb embed` | Embed project symbols into the vector store | `--incremental` — only embed changed symbols |
 | `kb search <query>` | Semantic search over the KB | `--top-k N` (default: 10), `--filter KEY=VALUE` |
-| `kb qdrant start` | Start the Qdrant Docker container | — |
-| `kb qdrant stop` | Stop the Qdrant Docker container | — |
-| `kb qdrant status` | Show Qdrant container and connectivity status | — |
+
 
 #### Phase 3 — Global Knowledge Base
 
@@ -639,8 +637,7 @@ agentchanti kb <command> [options]
 #### Example Workflow
 
 ```bash
-# First time: index the project and start Qdrant
-agentchanti kb qdrant start
+# First time: index the project and embed
 agentchanti kb index
 agentchanti kb embed
 

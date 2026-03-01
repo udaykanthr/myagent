@@ -1,7 +1,7 @@
 """
 KB Startup Manager — smart decisions about what KB operations to run.
 
-Runs at every AgentChanti CLI start. Checks Qdrant, global KB, and
+Runs at every AgentChanti CLI start. Checks global KB and
 local KB state, then takes the minimum action needed.
 
 Target: < 10ms for the common case (nothing to do).  All heavy work
@@ -30,7 +30,6 @@ logger = logging.getLogger(__name__)
 class KBStartupReport:
     """Summarises what the startup manager did (or chose not to do)."""
 
-    qdrant_started: bool = False
     global_kb_seeded: bool = False
     local_index_triggered: bool = False
     local_incremental_triggered: bool = False
@@ -41,7 +40,6 @@ class KBStartupReport:
     def anything_happened(self) -> bool:
         """Return True if any visible action was taken."""
         return any([
-            self.qdrant_started,
             self.global_kb_seeded,
             self.local_index_triggered,
         ])
@@ -50,8 +48,6 @@ class KBStartupReport:
     def print_summary(self) -> None:
         """Print a compact summary of actions taken (only if visible)."""
         lines = ["[KB] Startup:"]
-        if self.qdrant_started:
-            lines.append("  + Qdrant started")
         if self.global_kb_seeded:
             lines.append("  + Global KB initialized")
         if self.local_index_triggered:
@@ -73,7 +69,6 @@ class KBStartupManager:
     ──────────────────────────────────────────────────────────────
     Condition                            Action
     ──────────────────────────────────────────────────────────────
-    vector_backend=qdrant + not running→ Auto-start Docker (blocking, fast)
     global_kb collection missing       → seed_all() (blocking, one-time)
     global_kb exists                   → Nothing
     No local index + blank project     → Nothing (RuntimeWatcher handles)
@@ -83,15 +78,10 @@ class KBStartupManager:
     11-50 files changed                → Incremental update in background
     > 50 files changed OR > 60m stale  → Full re-index in background
     ──────────────────────────────────────────────────────────────
-
-    Parameters
-    ----------
-    vector_backend:
-        ``"local"`` (default) or ``"qdrant"``.
     """
 
-    def __init__(self, vector_backend: str = "local") -> None:
-        self._vector_backend = vector_backend
+    def __init__(self) -> None:
+        pass
 
     def run(self, project_root: str, api_client=None) -> KBStartupReport:
         """
@@ -110,16 +100,7 @@ class KBStartupManager:
         """
         report = KBStartupReport()
 
-        # 1. CHECK QDRANT (only when using qdrant backend)
-        if self._vector_backend == "qdrant":
-            try:
-                if not self._qdrant_running():
-                    self._start_qdrant(project_root)
-                    report.qdrant_started = True
-            except Exception as exc:
-                logger.debug("[KB] Qdrant auto-start failed: %s", exc)
-
-        # 2. CHECK GLOBAL KB (seed)
+        # 1. CHECK GLOBAL KB (seed)
         try:
             if not self._global_kb_exists():
                 logger.info("[KB] Initializing Global KB for first time...")
@@ -128,31 +109,17 @@ class KBStartupManager:
         except Exception as exc:
             logger.debug("[KB] Global KB seed failed: %s", exc)
 
-        # 3. CHECK LOCAL KB (index + embed)
+        # 2. CHECK LOCAL KB (index + embed)
         try:
             self._check_local_kb(project_root, report, api_client)
         except Exception as exc:
             logger.debug("[KB] Local KB check failed: %s", exc)
 
-        # 4. PRINT STARTUP SUMMARY (only if something happened)
+        # 3. PRINT STARTUP SUMMARY (only if something happened)
         if report.anything_happened():
             report.print_summary()
 
         return report
-
-    # ------------------------------------------------------------------
-    # Qdrant helpers
-    # ------------------------------------------------------------------
-
-    def _qdrant_running(self) -> bool:
-        """Check if Qdrant is reachable."""
-        from .local.vector_store import is_qdrant_running
-        return is_qdrant_running()
-
-    def _start_qdrant(self, project_root: str) -> None:
-        """Auto-start Qdrant Docker container."""
-        from .local.vector_store import qdrant_start
-        qdrant_start(os.path.abspath(project_root))
 
     # ------------------------------------------------------------------
     # Global KB helpers
@@ -162,8 +129,7 @@ class KBStartupManager:
         """
         Check if the global KB has been seeded.
 
-        Checks errors.db has records — this is the most reliable indicator
-        because errors.db is always seeded and doesn't depend on Qdrant.
+        Checks errors.db has records — this is the most reliable indicator.
         """
         try:
             from .global_kb.error_dict import ErrorDict
@@ -180,7 +146,7 @@ class KBStartupManager:
     def _seed_global_kb(self, project_root: str) -> None:
         """Run the global KB seeder."""
         from .global_kb.seeder import seed
-        seed(embed=self._qdrant_running(), project_root=project_root)
+        seed(embed=False, project_root=project_root)
 
     # ------------------------------------------------------------------
     # Local KB: the main decision logic
@@ -366,9 +332,7 @@ class KBStartupManager:
 
             graph = indexer.load_graph()
             manifest = Manifest(_manifest_path(project_root))
-            vector_store = create_vector_store(
-                project_root, backend=self._vector_backend
-            )
+            vector_store = create_vector_store(project_root)
             embed_project(
                 graph=graph,
                 manifest=manifest,

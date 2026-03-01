@@ -6,7 +6,7 @@ Seeds:
   Java, Go, Rust, C#)
 - registry/ markdown files with frontmatter for patterns, ADRs, docs,
   and behavioral categories
-- Qdrant ``global_kb`` collection with embedded markdown chunks
+- SQLite vector store with embedded markdown chunks
 
 Designed as a dev-utility that can be re-run to reset sample data.
 """
@@ -648,9 +648,9 @@ and blocks all concurrent operations.
 }
 
 _ADR_DOCS = {
-    "adr-001-use-qdrant-for-vector-store.md": {
-        "title": "ADR-001: Use Qdrant for Vector Store",
-        "tags": "adr, qdrant, vector-store, architecture",
+    "adr-001-use-sqlite-for-vector-store.md": {
+        "title": "ADR-001: Use SQLite for Vector Store",
+        "tags": "adr, sqlite, vector-store, architecture",
         "content": """## Status
 
 Accepted
@@ -660,32 +660,32 @@ Accepted
 The AgentChanti knowledge base requires a vector store for semantic search
 over code symbols and documentation. We evaluated several options:
 
-1. **Qdrant** — Open-source vector database, runs locally via Docker
+1. **SQLite** — Lightweight embedded database with custom vector support
 2. **ChromaDB** — Lightweight embedded vector store
 3. **FAISS** — Facebook's similarity search library (no server)
 4. **Pinecone** — Cloud-hosted managed vector database
 
 ## Decision
 
-We chose **Qdrant** for the following reasons:
+We chose **SQLite** for the following reasons:
 
 ### Advantages
-- **Local-first**: Runs as a Docker container, no cloud dependency
-- **Rich filtering**: Supports payload-based filtering alongside vector search
-- **Snapshot support**: Can export/import collections for offline distribution
-- **Production-grade**: Handles millions of vectors with consistent performance
-- **REST + gRPC APIs**: Flexible integration options
+- **Zero-dependency**: No external server or Docker required
+- **Embedded**: Runs in-process, no network overhead
+- **Portable**: Single-file database, easy to backup and distribute
+- **Battle-tested**: SQLite is the most widely deployed database
+- **Simple operations**: No container management needed
 
 ### Trade-offs
-- Requires Docker for local development
-- Heavier footprint than embedded solutions like ChromaDB
-- Additional operational complexity vs. in-memory FAISS
+- Less feature-rich than dedicated vector databases
+- Custom cosine similarity implementation via NumPy
+- No built-in clustering or HNSW index
 
 ## Consequences
 
-- All vector operations go through the Qdrant HTTP API on localhost:6333
-- The CLI includes `agentchanti kb qdrant start/stop/status` commands
-- Pre-built snapshots ship with the CLI for offline-first operation
+- All vector operations use the local SQLite database
+- Embeddings stored as binary blobs with cosine similarity search
+- No external services required — fully offline operation
 - Collection naming convention: `local_{project_slug}` for per-project,
   `global_kb` for the shared knowledge base
 """,
@@ -797,80 +797,52 @@ For large files (>10K lines), parsing may take >100ms. The incremental
 parser helps by only re-parsing changed regions during watch mode.
 """,
     },
-    "qdrant-local-setup-guide.md": {
-        "title": "Qdrant Local Setup Guide",
-        "tags": "qdrant, setup, docker, vector-store, guide",
+    "vector-store-usage-guide.md": {
+        "title": "Vector Store Usage Guide",
+        "tags": "sqlite, vector-store, setup, guide",
         "content": """## Overview
 
-Qdrant runs locally as a Docker container for the AgentChanti semantic
-search layer. This guide covers setup, configuration, and management.
+AgentChanti uses a local SQLite-based vector store for semantic search
+over code symbols and documentation. No external services are required.
 
 ## Prerequisites
 
-- Docker installed and running
-- At least 512MB free RAM for the Qdrant container
+- Python 3.9+
+- NumPy (optional, for optimized similarity search)
 
 ## Quick Start
 
 ```bash
-# Start Qdrant via AgentChanti CLI
-agentchanti kb qdrant start
+# Index the project
+agentchanti kb index
 
-# Check status
-agentchanti kb qdrant status
+# Embed symbols into the vector store
+agentchanti kb embed
 
-# Stop when done
-agentchanti kb qdrant stop
+# Search
+agentchanti kb search "authentication middleware"
 ```
 
-## Manual Docker Setup
+## How It Works
 
-If you prefer manual control:
-
-```bash
-docker run -d \\
-  --name agentchanti-qdrant \\
-  -p 6333:6333 \\
-  -v ~/.agentchanti/qdrant:/qdrant/storage \\
-  qdrant/qdrant
-```
-
-## Collections
-
-AgentChanti creates these collections:
-
-| Collection | Purpose | Vector Size |
-|------------|---------|-------------|
-| `local_{project}` | Per-project code symbols | 1536 |
-| `global_kb` | Shared knowledge base | 1536 |
+1. Code symbols are extracted via Tree-sitter
+2. Embeddings are generated using the configured LLM provider
+3. Embeddings are stored in a local SQLite database
+4. Searches compute cosine similarity against stored embeddings
 
 ## Storage
 
-Qdrant data is stored at:
-- Per-project: `{project}/.agentchanti/kb/local/qdrant/`
-- Global: managed by the Qdrant container's shared volume
-
-## Backup & Restore
-
-```bash
-# Create a snapshot
-curl -X POST 'http://localhost:6333/collections/global_kb/snapshots'
-
-# List snapshots
-curl 'http://localhost:6333/collections/global_kb/snapshots'
-```
+Vector data is stored at:
+- Per-project: `{project}/.agentchanti/kb/local/vectors.db`
+- Global: `~/.agentchanti/global_kb/vectors.db`
 
 ## Troubleshooting
 
-### Port Already in Use
-If port 6333 is occupied, stop the existing container or change the port
-in your configuration.
-
-### Container Won't Start
-Check Docker logs: `docker logs agentchanti-qdrant`
-
-### Collection Not Found
+### No Results
 Ensure you've run indexing first: `agentchanti kb index && agentchanti kb embed`
+
+### Slow Search
+Install NumPy for optimized vector operations: `pip install numpy`
 """,
     },
 }
@@ -1099,10 +1071,9 @@ def seed(
     Parameters
     ----------
     embed:
-        If True, embed markdown documents into the Qdrant ``global_kb``
-        collection.  Requires Qdrant running and OpenAI API key.
+        If True, embed markdown documents into the SQLite vector store.
     project_root:
-        Project root for Qdrant storage path.  Defaults to cwd.
+        Project root for vector store path.  Defaults to cwd.
     api_client:
         LLM client to use for embedding.
 
@@ -1176,7 +1147,7 @@ def seed(
     summary["docs_seeded"] = len(md_files)
     logger.info("Wrote %d markdown documents", summary["docs_seeded"])
 
-    # ── 3. Embed into Qdrant/SQLite (optional) ──────────────────────────
+    # ── 3. Embed into SQLite vector store (optional) ──────────────────────
     if embed:
         try:
             if api_client is None:

@@ -1,12 +1,9 @@
 """
 Semantic search over the Local Knowledge Base — Phase 2.
 
-Combines vector search (local SQLite or Qdrant) with Phase 1 graph
+Combines vector search (SQLite vector store) with Phase 1 graph
 look-ups to return ranked :class:`SearchResult` objects enriched
 with source code snippets and related-symbol information.
-
-Graceful degradation: if the vector store is unavailable or empty,
-falls back to keyword search over the Phase 1 graph manifest.
 """
 
 from __future__ import annotations
@@ -16,13 +13,6 @@ import os
 import time
 from dataclasses import dataclass, field
 from typing import Any, Optional, TYPE_CHECKING
-
-# Keep this import for backward compatibility — existing tests patch it
-try:
-    from .vector_store import is_qdrant_running  # noqa: F401
-except ImportError:
-    def is_qdrant_running() -> bool:  # type: ignore[misc]
-        return False
 
 if TYPE_CHECKING:
     from .graph import CodeGraph
@@ -54,7 +44,7 @@ class SearchResult:
     code_snippet:
         Actual source lines from *line_start* to *line_end*.
     score:
-        Cosine similarity score from Qdrant (0–1).  Set to 0.0 for
+        Cosine similarity score from the vector store (0–1).  Set to 0.0 for
         graph-only fallback results.
     related_symbols:
         1-hop graph neighbours from Phase 1.  Each entry is a dict
@@ -160,7 +150,7 @@ def _graph_keyword_search(
     filters: Optional[dict],
 ) -> list[SearchResult]:
     """
-    Naive keyword search over the graph when Qdrant is unavailable.
+    Naive keyword search over the graph when the vector store is unavailable.
 
     Searches symbol names and file paths for tokens in *query*.
 
@@ -267,7 +257,7 @@ class Searcher:
         Loaded :class:`~agentchanti.kb.local.manifest.Manifest`.
     vector_store:
         Any vector store with a ``.search()`` method — either
-        :class:`QdrantStore` or :class:`SQLiteVectorStore`.
+        :class:`SQLiteVectorStore`.
     project_root:
         Absolute path to the project root.
     """
@@ -347,7 +337,7 @@ class Searcher:
                 self._project_root, top_k, filters
             )
 
-        # Build store filters (works for both Qdrant and SQLite stores)
+        # Build store filters (works for SQLite vector store)
         store_filters: Optional[dict] = None
         if filters:
             store_filters = {}
@@ -370,7 +360,7 @@ class Searcher:
                 self._project_root, top_k, filters
             )
 
-        # Post-filter for file path substring (Qdrant doesn't do prefix match)
+        # Post-filter for file path substring (vector store doesn't do prefix match)
         file_filter = (filters or {}).get("file", "")
         if file_filter:
             raw_results = [

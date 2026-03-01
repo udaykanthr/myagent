@@ -34,7 +34,7 @@ class KBFileHandler:
         Minimum delay between processing the same file (prevents rapid
         re-indexing on editor auto-saves).
     vector_store:
-        Optional :class:`~agentchanti.kb.local.vector_store.QdrantStore`.
+        Optional :class:`~agentchanti.kb.local.sqlite_vector_store.SQLiteVectorStore`.
         When provided, changed files are re-embedded after the graph update.
     """
 
@@ -154,14 +154,14 @@ class KBFileHandler:
             logger.warning("[KB watcher] Error removing %s: %s", rel_path, exc)
             return
 
-        # Phase 2: remove Qdrant points for this file.
+        # Phase 2: remove vector store points for this file.
         if self._vector_store is not None:
             try:
                 self._vector_store.delete_by_file(rel_path)
-                logger.info("[KB watcher] Removed Qdrant points for %s", rel_path)
+                logger.info("[KB watcher] Removed vector store points for %s", rel_path)
             except Exception as exc:
                 logger.warning(
-                    "[KB watcher] Failed to remove Qdrant points for %s: %s",
+                    "[KB watcher] Failed to remove vector store points for %s: %s",
                     rel_path, exc
                 )
 
@@ -219,7 +219,7 @@ class KBWatcher:
     project_root:
         Directory to watch.
     vector_store:
-        Optional :class:`~agentchanti.kb.local.vector_store.QdrantStore`.
+        Optional :class:`~agentchanti.kb.local.sqlite_vector_store.SQLiteVectorStore`.
         When provided, changed files are re-embedded automatically after
         each incremental graph update (Phase 2 integration).
     """

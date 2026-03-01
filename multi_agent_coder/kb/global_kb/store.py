@@ -1,7 +1,7 @@
 """
 Unified global knowledge base query interface.
 
-Provides a single ``search()`` method that queries both the Qdrant
+Provides a single ``search()`` method that queries both the SQLite vector
 ``global_kb`` collection and the SQLite ``errors.db``, returning
 ranked results across all categories.
 """
@@ -47,7 +47,7 @@ class GlobalKBStore:
     Unified interface over all global KB content.
 
     Combines:
-    - Qdrant ``global_kb`` collection for semantic search over documents
+    - SQLite vector store for semantic search over documents
     - SQLite ``errors.db`` for deterministic error lookups
 
     Parameters
@@ -231,7 +231,7 @@ class GlobalKBStore:
             results.append(GlobalKBResult(
                 title=payload.get("title", ""),
                 category=cat,
-                content="",  # Content stored in files, not Qdrant payload
+                content="",  # Content stored in files, not vector payload
                 file=payload.get("file", ""),
                 score=hit.get("score", 0.0),
                 tags=payload.get("tags", []),
@@ -241,7 +241,7 @@ class GlobalKBStore:
         return results
 
     # ------------------------------------------------------------------
-    # Fallback file search (offline / no Qdrant)
+    # Fallback file search (offline / no vector store)
     # ------------------------------------------------------------------
 
     def _fallback_file_search(
@@ -252,7 +252,7 @@ class GlobalKBStore:
         top_k: int,
     ) -> list[GlobalKBResult]:
         """
-        Simple keyword-based file search when Qdrant is unavailable.
+        Simple keyword-based file search when the vector store is unavailable.
 
         Scans registry markdown files for query terms.
         """
@@ -327,13 +327,9 @@ def _get_global_vector_store():
     backend = cfg.KB_VECTOR_BACKEND
     
     if backend == "qdrant":
-        try:
-            from .seeder import _GlobalQdrantStore
-            from ..local.vector_store import is_qdrant_running
-            if is_qdrant_running():
-                return _GlobalQdrantStore()
-        except ImportError:
-            logger.warning("Qdrant not available, falling back to global SQLite.")
+        # Legacy: Qdrant backend is no longer supported.
+        # Fall through to SQLite.
+        logger.warning("Qdrant backend is no longer supported, using SQLite.")
 
     # Fallback / Default: SQLite
     from ..local.sqlite_vector_store import SQLiteVectorStore

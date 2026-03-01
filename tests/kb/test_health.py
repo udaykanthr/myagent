@@ -28,7 +28,6 @@ class TestKBHealth:
         assert h.local_symbol_count == 0
         assert h.local_last_indexed is None
         assert h.local_index_stale is False
-        assert h.qdrant_running is False
         assert h.global_kb_version == "unknown"
         assert h.global_kb_last_updated is None
         assert h.registry_update_available is False
@@ -83,13 +82,11 @@ class TestFormatHealth:
         h = KBHealth(
             local_kb_indexed=True,
             local_symbol_count=150,
-            qdrant_running=True,
             global_kb_version="1.2.0",
         )
         output = format_health(h)
         assert "Knowledge Base Health Report" in output
         assert "Local KB:" in output
-        assert "Qdrant:" in output
         assert "Global KB:" in output
         assert "150" in output
         assert "1.2.0" in output
@@ -133,7 +130,7 @@ class TestToJson:
         data = json.loads(to_json(h))
         expected_keys = {
             "local_kb_indexed", "local_symbol_count", "local_last_indexed",
-            "local_index_stale", "qdrant_running", "global_kb_version",
+            "local_index_stale", "global_kb_version",
             "global_kb_last_updated", "registry_update_available",
         }
         assert set(data.keys()) == expected_keys

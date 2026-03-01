@@ -22,9 +22,6 @@ agentchanti kb search "<query>"    -- semantic search
 agentchanti kb search "<query>" --top-k 5
 agentchanti kb search "<query>" --filter file=src/auth
 agentchanti kb search "<query>" --filter language=python
-agentchanti kb qdrant start        -- start Qdrant Docker container
-agentchanti kb qdrant stop         -- stop Qdrant Docker container
-agentchanti kb qdrant status       -- show Qdrant status
 
 Phase 3 — Global Knowledge Base
 agentchanti kb update                       -- pull latest from GitHub registry
@@ -424,23 +421,6 @@ def _cmd_search(args: argparse.Namespace) -> None:
     print(f"\n  Search time: {elapsed_ms:.1f}ms")
 
 
-def _cmd_qdrant(args: argparse.Namespace) -> None:
-    """Dispatch qdrant subcommands."""
-    from .local.vector_store import qdrant_start, qdrant_stop, qdrant_status
-
-    qdrant_cmd = args.qdrant_cmd
-
-    if qdrant_cmd == "start":
-        project_root = _project_root()
-        qdrant_start(project_root)
-    elif qdrant_cmd == "stop":
-        qdrant_stop()
-    elif qdrant_cmd == "status":
-        qdrant_status()
-    else:
-        print(f"Unknown qdrant command: {qdrant_cmd}", file=sys.stderr)
-        print("Available: start, stop, status", file=sys.stderr)
-        sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
@@ -775,7 +755,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # --- embed ---
     embed_p = subparsers.add_parser(
-        "embed", help="Embed project symbols into Qdrant (Phase 2)"
+        "embed", help="Embed project symbols into the vector store"
     )
     embed_p.add_argument(
         "--incremental", action="store_true",
@@ -798,20 +778,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     search_p.set_defaults(func=_cmd_search)
 
-    # --- qdrant ---
-    qdrant_p = subparsers.add_parser(
-        "qdrant", help="Manage the local Qdrant Docker container (Phase 2)"
-    )
-    qdrant_sub = qdrant_p.add_subparsers(dest="qdrant_cmd", metavar="ACTION")
-    qdrant_sub.required = True
-    qdrant_p.set_defaults(func=_cmd_qdrant)
 
-    for qname, qhelp in [
-        ("start",  "Start the Qdrant Docker container"),
-        ("stop",   "Stop the Qdrant Docker container"),
-        ("status", "Show Qdrant container status"),
-    ]:
-        qdrant_sub.add_parser(qname, help=qhelp)
 
     # =======================================================================
     # Phase 3 — Global Knowledge Base commands
@@ -823,7 +790,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     seed_p.add_argument(
         "--no-embed", action="store_true",
-        help="Skip embedding into Qdrant (seed errors.db and .md files only)",
+        help="Skip embedding (seed errors.db and .md files only)",
     )
     seed_p.set_defaults(func=_cmd_seed)
 

@@ -25,7 +25,6 @@ class TestKBStartupReport:
 
     def test_defaults(self):
         report = KBStartupReport()
-        assert not report.qdrant_started
         assert not report.global_kb_seeded
         assert not report.local_index_triggered
         assert not report.local_incremental_triggered
@@ -35,10 +34,6 @@ class TestKBStartupReport:
     def test_anything_happened_false_by_default(self):
         report = KBStartupReport()
         assert not report.anything_happened()
-
-    def test_anything_happened_qdrant(self):
-        report = KBStartupReport(qdrant_started=True)
-        assert report.anything_happened()
 
     def test_anything_happened_global_kb(self):
         report = KBStartupReport(global_kb_seeded=True)
@@ -55,12 +50,6 @@ class TestKBStartupReport:
         )
         assert not report.anything_happened()
 
-    def test_print_summary_qdrant(self, capsys):
-        report = KBStartupReport(qdrant_started=True)
-        report.print_summary()
-        out = capsys.readouterr().out
-        assert "Qdrant started" in out
-
     def test_print_summary_global(self, capsys):
         report = KBStartupReport(global_kb_seeded=True)
         report.print_summary()
@@ -76,46 +65,6 @@ class TestKBStartupReport:
         assert "Local KB indexing started" in out
         assert "background" in out
 
-
-# ---------------------------------------------------------------------------
-# KBStartupManager — Qdrant checks
-# ---------------------------------------------------------------------------
-
-class TestStartupQdrant:
-
-    @patch.object(KBStartupManager, "_check_local_kb")
-    @patch.object(KBStartupManager, "_global_kb_exists", return_value=True)
-    @patch.object(KBStartupManager, "_qdrant_running", return_value=True)
-    def test_qdrant_already_running(self, mock_qr, mock_gk, mock_lk):
-        """When Qdrant is running, qdrant_started stays False."""
-        report = KBStartupManager().run("/tmp/project")
-        assert not report.qdrant_started
-
-    @patch.object(KBStartupManager, "_check_local_kb")
-    @patch.object(KBStartupManager, "_global_kb_exists", return_value=True)
-    @patch.object(KBStartupManager, "_start_qdrant")
-    @patch.object(KBStartupManager, "_qdrant_running", return_value=False)
-    def test_qdrant_auto_started(self, mock_qr, mock_start, mock_gk, mock_lk):
-        """When Qdrant is not running, it should be auto-started."""
-        report = KBStartupManager(vector_backend="qdrant").run("/tmp/project")
-        assert report.qdrant_started
-        mock_start.assert_called_once_with("/tmp/project")
-
-    @patch.object(KBStartupManager, "_check_local_kb")
-    @patch.object(KBStartupManager, "_global_kb_exists", return_value=True)
-    @patch.object(
-        KBStartupManager, "_start_qdrant",
-        side_effect=Exception("Docker not found"),
-    )
-    @patch.object(KBStartupManager, "_qdrant_running", return_value=False)
-    def test_qdrant_start_failure_swallowed(
-        self, mock_qr, mock_start, mock_gk, mock_lk
-    ):
-        """Qdrant start failure should be swallowed, not crash."""
-        report = KBStartupManager().run("/tmp/project")
-        assert not report.qdrant_started
-
-
 # ---------------------------------------------------------------------------
 # KBStartupManager — Global KB checks
 # ---------------------------------------------------------------------------
@@ -123,19 +72,17 @@ class TestStartupQdrant:
 class TestStartupGlobalKB:
 
     @patch.object(KBStartupManager, "_check_local_kb")
-    @patch.object(KBStartupManager, "_qdrant_running", return_value=True)
     @patch.object(KBStartupManager, "_global_kb_exists", return_value=True)
-    def test_global_kb_exists_no_seed(self, mock_gk, mock_qr, mock_lk):
+    def test_global_kb_exists_no_seed(self, mock_gk, mock_lk):
         """When global KB exists, no seeding should happen."""
         report = KBStartupManager().run("/tmp/project")
         assert not report.global_kb_seeded
 
     @patch.object(KBStartupManager, "_check_local_kb")
-    @patch.object(KBStartupManager, "_qdrant_running", return_value=True)
     @patch.object(KBStartupManager, "_seed_global_kb")
     @patch.object(KBStartupManager, "_global_kb_exists", return_value=False)
     def test_global_kb_missing_triggers_seed(
-        self, mock_gk, mock_seed, mock_qr, mock_lk
+        self, mock_gk, mock_seed, mock_lk
     ):
         """When global KB doesn't exist, seeder should run."""
         report = KBStartupManager().run("/tmp/project")
@@ -143,14 +90,13 @@ class TestStartupGlobalKB:
         mock_seed.assert_called_once_with("/tmp/project")
 
     @patch.object(KBStartupManager, "_check_local_kb")
-    @patch.object(KBStartupManager, "_qdrant_running", return_value=True)
     @patch.object(
         KBStartupManager, "_seed_global_kb",
         side_effect=Exception("seed fail"),
     )
     @patch.object(KBStartupManager, "_global_kb_exists", return_value=False)
     def test_global_kb_seed_failure_swallowed(
-        self, mock_gk, mock_seed, mock_qr, mock_lk
+        self, mock_gk, mock_seed, mock_lk
     ):
         """Global KB seed failure should be swallowed."""
         report = KBStartupManager().run("/tmp/project")
@@ -168,7 +114,6 @@ class TestStartupLocalKB:
         """Create a KBStartupManager with mocked dependencies."""
         mgr = KBStartupManager()
         # Defaults
-        mgr._qdrant_running = MagicMock(return_value=True)
         mgr._global_kb_exists = MagicMock(return_value=True)
         mgr._run_background = MagicMock()
         for k, v in overrides.items():
@@ -418,12 +363,9 @@ class TestStartupIntegration:
 
     @patch.object(KBStartupManager, "_check_local_kb")
     @patch.object(KBStartupManager, "_global_kb_exists", return_value=True)
-    @patch.object(KBStartupManager, "_qdrant_running", return_value=True)
-    def test_common_case_nothing_to_do(self, mock_qr, mock_gk, mock_lk):
+    def test_common_case_nothing_to_do(self, mock_gk, mock_lk):
         """Common case: everything ready, nothing to do → fast path."""
         report = KBStartupManager().run("/tmp/project")
-
-        assert not report.qdrant_started
         assert not report.global_kb_seeded
         assert not report.anything_happened()
 
@@ -432,29 +374,23 @@ class TestStartupIntegration:
     @patch.object(KBStartupManager, "_read_graph_meta", return_value=None)
     @patch.object(KBStartupManager, "_seed_global_kb")
     @patch.object(KBStartupManager, "_global_kb_exists", return_value=False)
-    @patch.object(KBStartupManager, "_start_qdrant")
-    @patch.object(KBStartupManager, "_qdrant_running", return_value=False)
     def test_fresh_install_small_project(
-        self, mock_qr, mock_start, mock_gk, mock_seed,
+        self, mock_gk, mock_seed,
         mock_meta, mock_files, mock_bg, capsys,
     ):
         """Fresh install + small project → start qdrant, seed, index (sync)."""
-        report = KBStartupManager(vector_backend="qdrant").run("/tmp/project")
-
-        assert report.qdrant_started
+        report = KBStartupManager().run("/tmp/project")
         assert report.global_kb_seeded
         assert report.local_index_triggered
         assert not report.background  # synchronous now
-        mock_start.assert_called_once()
         mock_seed.assert_called_once()
 
     @patch.object(KBStartupManager, "_run_background")
     @patch.object(KBStartupManager, "_count_project_files", return_value=200)
     @patch.object(KBStartupManager, "_read_graph_meta", return_value=None)
     @patch.object(KBStartupManager, "_global_kb_exists", return_value=True)
-    @patch.object(KBStartupManager, "_qdrant_running", return_value=True)
     def test_fresh_install_large_project(
-        self, mock_qr, mock_gk, mock_meta, mock_files, mock_bg,
+        self, mock_gk, mock_meta, mock_files, mock_bg,
     ):
         """Large project without index → synchronous full index (no longer skipped)."""
         report = KBStartupManager().run("/tmp/project")
@@ -470,9 +406,8 @@ class TestStartupIntegration:
         return_value={"last_indexed": "2025-01-01T00:00:00Z"},
     )
     @patch.object(KBStartupManager, "_global_kb_exists", return_value=True)
-    @patch.object(KBStartupManager, "_qdrant_running", return_value=True)
     def test_existing_project_nothing_changed(
-        self, mock_qr, mock_gk, mock_meta, mock_age, mock_changed, mock_bg,
+        self, mock_gk, mock_meta, mock_age, mock_changed, mock_bg,
     ):
         """Existing project, 0 changes → silent, < 10ms."""
         report = KBStartupManager().run("/tmp/project")
@@ -490,9 +425,8 @@ class TestStartupIntegration:
         return_value={"last_indexed": "2025-01-01T00:00:00Z"},
     )
     @patch.object(KBStartupManager, "_global_kb_exists", return_value=True)
-    @patch.object(KBStartupManager, "_qdrant_running", return_value=True)
     def test_existing_project_few_changes(
-        self, mock_qr, mock_gk, mock_meta, mock_age, mock_changed, mock_bg,
+        self, mock_gk, mock_meta, mock_age, mock_changed, mock_bg,
     ):
         """5 files changed → silent incremental background update."""
         report = KBStartupManager().run("/tmp/project")
@@ -510,9 +444,8 @@ class TestStartupIntegration:
         return_value={"last_indexed": "2025-01-01T00:00:00Z"},
     )
     @patch.object(KBStartupManager, "_global_kb_exists", return_value=True)
-    @patch.object(KBStartupManager, "_qdrant_running", return_value=True)
     def test_existing_project_very_stale(
-        self, mock_qr, mock_gk, mock_meta, mock_age, mock_changed, mock_bg,
+        self, mock_gk, mock_meta, mock_age, mock_changed, mock_bg,
     ):
         """Very stale index (> 60 min, > 50 changes) → full re-index bg."""
         report = KBStartupManager().run("/tmp/project")
@@ -524,7 +457,6 @@ class TestStartupIntegration:
     def test_all_exceptions_swallowed(self):
         """KBStartupManager.run should never raise, even if everything fails."""
         mgr = KBStartupManager()
-        mgr._qdrant_running = MagicMock(side_effect=Exception("fail1"))
         mgr._global_kb_exists = MagicMock(side_effect=Exception("fail2"))
         mgr._check_local_kb = MagicMock(side_effect=Exception("fail3"))
 

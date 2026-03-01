@@ -43,7 +43,7 @@ Supports local LLMs ([Ollama](https://ollama.com), [LM Studio](https://lmstudio.
 
 - **Python 3.10+** ([python.org](https://www.python.org/downloads/))
 - **Git** ([git-scm.com](https://git-scm.com/))
-- **Docker** ([docs.docker.com/get-docker](https://docs.docker.com/get-docker/)) — required for the Knowledge Base semantic layer (runs a Qdrant vector DB container)
+
 - A local LLM server **or** a cloud API key
 
 ### Installation
@@ -136,9 +136,7 @@ agentchanti "Generate unit tests" --auto --no-git --no-report
 Manage the project knowledge base via `agentchanti kb`:
 
 ```bash
-agentchanti kb qdrant start          # Start Qdrant Docker container
-agentchanti kb index                 # Index the project code graph
-agentchanti kb embed                 # Embed symbols into Qdrant
+agentchanti kb embed                 # Embed symbols into the vector store
 agentchanti kb search "query"        # Semantic search over KB
 agentchanti kb query find-callers X  # Find all callers of a function
 agentchanti kb error-lookup "msg"    # Look up error fixes

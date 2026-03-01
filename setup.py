@@ -29,7 +29,6 @@ setup(
         # Phase 2 — Semantic Layer (install separately when needed)
         "semantic": [
             "openai>=1.0",
-            "qdrant-client>=1.7",
         ],
     },
     entry_points={

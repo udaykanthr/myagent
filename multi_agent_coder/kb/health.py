@@ -24,7 +24,6 @@ class KBHealth:
     local_symbol_count: int = 0
     local_last_indexed: Optional[str] = None
     local_index_stale: bool = False
-    qdrant_running: bool = False
     global_kb_version: str = "unknown"
     global_kb_last_updated: Optional[str] = None
     registry_update_available: bool = False
@@ -71,14 +70,6 @@ def check(project_root: Optional[str] = None) -> KBHealth:
                     health.local_index_stale = True
     except Exception as exc:
         logger.debug("[KB health] Local KB check failed: %s", exc)
-
-    # --- Qdrant ---
-    try:
-        from .local.vector_store import is_qdrant_running
-
-        health.qdrant_running = is_qdrant_running()
-    except Exception as exc:
-        logger.debug("[KB health] Qdrant check failed: %s", exc)
 
     # --- Global KB ---
     try:
@@ -137,9 +128,6 @@ def format_health(health: KBHealth) -> str:
         f"  Last indexed  : {health.local_last_indexed or 'never'}"
         f"{_stale(health.local_index_stale)}",
         "",
-        "Qdrant:",
-        f"  Running       : {_status(health.qdrant_running)}",
-        "",
         "Global KB:",
         f"  Version       : {health.global_kb_version}",
         f"  Last updated  : {health.global_kb_last_updated or 'unknown'}",
@@ -168,7 +156,6 @@ def to_json(health: KBHealth) -> str:
         "local_symbol_count": health.local_symbol_count,
         "local_last_indexed": health.local_last_indexed,
         "local_index_stale": health.local_index_stale,
-        "qdrant_running": health.qdrant_running,
         "global_kb_version": health.global_kb_version,
         "global_kb_last_updated": health.global_kb_last_updated,
         "registry_update_available": health.registry_update_available,

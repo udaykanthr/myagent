@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 
 _logger = logging.getLogger(__name__)
@@ -286,8 +287,10 @@ def _run_task_impl(
 
             if success:
                 step_results[idx] = "done"
+                ds = {"elapsed": time.monotonic() - display.start_time, "steps": display.steps}
                 save_checkpoint(checkpoint_file, task, steps, idx,
-                                memory.as_dict(), step_results, language)
+                                memory.as_dict(), step_results, language,
+                                display_state=ds)
             else:
                 fixed = _run_diagnosis_loop(
                     idx, step_text, error_info,
@@ -301,6 +304,10 @@ def _run_task_impl(
                 )
                 if fixed:
                     step_results[idx] = "done"
+                    ds = {"elapsed": time.monotonic() - display.start_time, "steps": display.steps}
+                    save_checkpoint(checkpoint_file, task, steps, idx,
+                                    memory.as_dict(), step_results, language,
+                                    display_state=ds)
                 else:
                     pipeline_success = False
                     break

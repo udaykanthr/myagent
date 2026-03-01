@@ -379,6 +379,16 @@ def main():
         # Mark completed steps
         for idx in range(start_from):
             display.steps[idx]["status"] = "done"
+
+        if "display_state" in checkpoint_state:
+            ds = checkpoint_state["display_state"]
+            if "elapsed" in ds:
+                display.start_time = time.monotonic() - ds["elapsed"]
+            if "steps" in ds:
+                for i, saved_step in enumerate(ds["steps"]):
+                    if i < len(display.steps):
+                        display.steps[i].update(saved_step)
+
         display.render()
     else:
         # Fresh start
@@ -523,8 +533,10 @@ def main():
 
             if success:
                 step_results[idx] = "done"
+                ds = {"elapsed": time.monotonic() - display.start_time, "steps": display.steps}
                 save_checkpoint(checkpoint_file, args.task, steps, idx,
-                                memory.as_dict(), step_results, language)
+                                memory.as_dict(), step_results, language,
+                                display_state=ds)
 
                 # Budget check after step
                 if display.budget_check(cfg.BUDGET_LIMIT):
@@ -544,8 +556,10 @@ def main():
                 )
                 if fixed:
                     step_results[idx] = "done"
+                    ds = {"elapsed": time.monotonic() - display.start_time, "steps": display.steps}
                     save_checkpoint(checkpoint_file, args.task, steps, idx,
-                                    memory.as_dict(), step_results, language)
+                                    memory.as_dict(), step_results, language,
+                                    display_state=ds)
                     
                     # Budget check after fix
                     if display.budget_check(cfg.BUDGET_LIMIT):
@@ -591,8 +605,10 @@ def main():
             max_completed = max(
                 (i for i in step_results if step_results[i] == "done"),
                 default=start_from - 1)
+            ds = {"elapsed": time.monotonic() - display.start_time, "steps": display.steps}
             save_checkpoint(checkpoint_file, args.task, steps, max_completed,
-                            memory.as_dict(), step_results, language)
+                            memory.as_dict(), step_results, language,
+                            display_state=ds)
 
             # Handle failures
             for idx, error_info in failed_steps:
@@ -608,8 +624,10 @@ def main():
                 )
                 if fixed:
                     step_results[idx] = "done"
+                    ds = {"elapsed": time.monotonic() - display.start_time, "steps": display.steps}
                     save_checkpoint(checkpoint_file, args.task, steps, idx,
-                                    memory.as_dict(), step_results, language)
+                                    memory.as_dict(), step_results, language,
+                                    display_state=ds)
                     
                     # Budget check after fix
                     if display.budget_check(cfg.BUDGET_LIMIT):

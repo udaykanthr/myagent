@@ -454,14 +454,11 @@ class TestFrameworkScopedDocs(unittest.TestCase):
                   "pellets", "tile", "unittest", "test", "wall", "sprite"}
 
     def _passes(self, title, tags=()):
-        from agentchanti.kb.context_builder import _DOC_FRAMEWORK_TOKENS
-        import re as _re
-        hay = title.lower() + " " + " ".join(t.lower() for t in tags)
-        words = set(_re.findall(r"[a-z0-9.+#]+", hay))
-        doc_fw = words & _DOC_FRAMEWORK_TOKENS
-        if not doc_fw:
-            return True
-        return bool(doc_fw & self.TASK_WORDS)
+        # Calls the shipped rule rather than restating it: a test that
+        # reimplements what it checks passes just as happily when the
+        # real filter is deleted.
+        from agentchanti.kb.context_builder import doc_survives_framework_scope
+        return doc_survives_framework_scope(title, tags, self.TASK_WORDS)
 
     def test_django_docs_are_dropped_from_a_pygame_project(self):
         self.assertFalse(self._passes(
@@ -532,3 +529,83 @@ class TestFrameworkScopedDocs(unittest.TestCase):
         self.assertTrue(
             any("Python Test Generation" in t for t in kept),
             f"generic Python docs must survive; kept={kept}")
+
+
+class TestTaskVocabulary(unittest.TestCase):
+    """Both sides of the comparison must tokenise the same way.
+
+    `.`, `+` and `#` belong in the character class so `three.js`, `c++`
+    and `c#` survive as one token — which also means prose punctuation
+    sticks to a word. "with Pygame." tokenised as `pygame.`, matched no
+    framework name, and made the project's OWN framework look foreign:
+    the fix that scoped the pre-analysis list would have dropped
+    "Pygame Setup Guide" from a Pygame task.
+    """
+
+    def test_trailing_punctuation_does_not_hide_a_framework(self):
+        from agentchanti.kb.context_builder import task_vocabulary
+        vocab = task_vocabulary("Build a Pac-Man clone in Python with Pygame.")
+        self.assertIn("pygame", vocab)
+
+    def test_dotted_framework_names_survive(self):
+        from agentchanti.kb.context_builder import task_vocabulary
+        self.assertIn("three.js", task_vocabulary("render it with three.js"))
+
+    def test_the_projects_own_framework_is_kept(self):
+        from agentchanti.kb.context_builder import (
+            doc_survives_framework_scope, task_vocabulary)
+        vocab = task_vocabulary("Build a Pac-Man clone in Python with Pygame.")
+        self.assertTrue(doc_survives_framework_scope(
+            "Pygame Setup Guide", ("pygame",), vocab))
+
+
+class _Doc:
+    def __init__(self, title, tags=()):
+        self.title = title
+        self.tags = tags
+
+
+class TestScopeDocsToProject(unittest.TestCase):
+    """The pre-analysis title list is scoped, not just the per-step build.
+
+    `language=` cannot separate these — the Django docs are correctly
+    tagged `language: "python"` and a Pygame game IS a Python project —
+    so every run of the Pac-Man benchmark surfaced "Django Page Creation
+    Pattern" to the IntentAgent. The per-step builder dropped it a layer
+    later, but this list is what the agent picks `KB docs:` from and what
+    the force-include net scans, which is how "Vitest React Testing
+    Library Setup" reached a Pygame plan.
+    """
+
+    TASK = ("Build a Pac-Man clone in Python with Pygame. maze ghosts "
+            "pellets unittest")
+
+    def _kept(self, *docs):
+        from agentchanti.kb.context_builder import (
+            scope_docs_to_project, task_vocabulary)
+        return [d.title for d in scope_docs_to_project(
+            list(docs), task_vocabulary(self.TASK))]
+
+    def test_drops_foreign_frameworks_keeps_the_rest(self):
+        kept = self._kept(
+            _Doc("Clean Code Naming Conventions"),
+            _Doc("Django Page Creation Pattern", ("django", "python")),
+            _Doc("Vitest React Testing Library Setup", ("vitest", "react")),
+            _Doc("Pygame Setup Guide", ("pygame",)),
+            _Doc("Python Test Generation Instructions", ("python", "pytest")),
+        )
+        self.assertEqual(kept, ["Clean Code Naming Conventions",
+                                "Pygame Setup Guide",
+                                "Python Test Generation Instructions"])
+
+    def test_no_task_text_keeps_everything(self):
+        # No task words is no evidence that a doc is foreign; dropping on
+        # a guess would lose good docs.
+        from agentchanti.kb.context_builder import scope_docs_to_project
+        docs = [_Doc("Django Page Creation Pattern", ("django",))]
+        self.assertEqual(len(scope_docs_to_project(docs, set())), 1)
+
+    def test_tolerates_empty_and_missing_input(self):
+        from agentchanti.kb.context_builder import scope_docs_to_project
+        self.assertEqual(scope_docs_to_project(None, {"pygame"}), [])
+        self.assertEqual(scope_docs_to_project([], {"pygame"}), [])

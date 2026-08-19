@@ -43,6 +43,87 @@ _DOC_FRAMEWORK_TOKENS = frozenset({
     "testing-library", "enzyme", "storybook",
 })
 
+def _tokens(text: str) -> set:
+    """Lower-cased words, with `.`/`+`/`#` kept INSIDE a token only.
+
+    Those three characters have to be in the character class so that
+    `three.js`, `c++` and `c#` survive as single tokens — but that also
+    means prose punctuation sticks: "with Pygame." tokenises as
+    `pygame.`, which matches no framework name and silently made the
+    project's OWN framework look foreign. Both forms are kept, so a
+    trailing period can neither hide a match nor lose `three.js`.
+    """
+    out: set = set()
+    for tok in re.findall(r"[a-z0-9.+#]+", (text or "").lower()):
+        out.add(tok)
+        stripped = tok.strip(".+#")
+        if stripped:
+            out.add(stripped)
+    return out
+
+
+def task_vocabulary(*texts: str) -> set:
+    """Lower-cased word set of the task, for framework scoping.
+
+    Tokenised exactly as a doc's title and tags are, so the two sides of
+    the comparison below can never disagree about what a word is.
+    """
+    vocab: set = set()
+    for text in texts:
+        vocab |= _tokens(text)
+    return vocab
+
+
+def doc_survives_framework_scope(title: str, tags, vocab: set) -> bool:
+    """Does a doc written FOR some framework belong in THIS project?
+
+    Asymmetric on purpose: it only has to recognise the framework the
+    *doc* is about, never the one the project uses. "Django Test
+    Generation Instructions" names django; a Pac-Man task never does; so
+    it goes — while "Python Test Generation Instructions" names no
+    framework at all and is kept, and "Pygame Setup Guide" is kept
+    because the task does say pygame.
+
+    The `language:` filter cannot do this: the Django docs are correctly
+    tagged `language: "python"`, and a Pygame game IS a Python project.
+    Measured cost of getting it wrong: 11.2KB (~2.8k tokens) of Django
+    material per affected step of a Pac-Man clone.
+
+    An empty *vocab* keeps everything — no task text is no evidence that
+    a doc is foreign, and guessing there would drop good docs.
+    """
+    if not vocab:
+        return True
+    haystack = (title or "").lower()
+    if isinstance(tags, str):
+        tags = tags.split(",")
+    haystack += " " + " ".join(str(t).lower() for t in (tags or ()))
+    doc_frameworks = _tokens(haystack) & _DOC_FRAMEWORK_TOKENS
+    if not doc_frameworks:
+        return True                       # framework-agnostic — keep
+    return bool(doc_frameworks & vocab)
+
+
+def scope_docs_to_project(items, vocab: set, where: str = "") -> list:
+    """Drop foreign-framework docs from *items*, logging each one.
+
+    Reads `.title`/`.tags` off whatever it is given, so it serves both a
+    search result and a KB record without either side knowing about the
+    other.
+    """
+    kept = []
+    for item in items or ():
+        title = getattr(item, "title", "") or ""
+        if doc_survives_framework_scope(
+                title, getattr(item, "tags", None), vocab):
+            kept.append(item)
+            continue
+        logger.debug(
+            "[KB] Dropping '%s'%s — targets a framework this project "
+            "does not use", title, f" ({where})" if where else "")
+    return kept
+
+
 # ---------------------------------------------------------------------------
 # Intent detection keywords
 # ---------------------------------------------------------------------------
@@ -378,34 +459,15 @@ class ContextBuilder:
                     _topic_vocab |= set(_t)
 
                 def _passes_framework_filter(item) -> bool:
-                    """Drop docs written FOR a framework this project lacks.
+                    """Thin wrapper — the rule itself lives at module level.
 
-                    Asymmetric on purpose: it only has to recognise the
-                    framework the *doc* is about, never the one the project
-                    uses. "Django Test Generation Instructions" names django;
-                    a Pac-Man task never does; so it goes — while "Python
-                    Test Generation Instructions" names no framework at all
-                    and is kept, and "Pygame Setup Guide" is kept because the
-                    task does say pygame.
-
-                    The language filter cannot do this: the Django docs are
-                    correctly tagged `language: "python"`, and this IS a
-                    Python project. Measured cost of getting it wrong: 11.2KB
-                    (~2.8k tokens) of Django material per affected step of a
-                    Pygame game.
+                    It has two callers (this, and the planner's
+                    pre-analysis title list), and a rule with two copies
+                    is a rule with two behaviours.
                     """
-                    if not _topic_vocab:
-                        return True
-                    haystack = (getattr(item, "title", "") or "").lower()
-                    tags = getattr(item, "tags", None) or []
-                    if isinstance(tags, str):
-                        tags = tags.split(",")
-                    haystack += " " + " ".join(str(t).lower() for t in tags)
-                    words = set(re.findall(r"[a-z0-9.+#]+", haystack))
-                    doc_frameworks = words & _DOC_FRAMEWORK_TOKENS
-                    if not doc_frameworks:
-                        return True          # framework-agnostic — keep
-                    return bool(doc_frameworks & _topic_vocab)
+                    return doc_survives_framework_scope(
+                        getattr(item, "title", "") or "",
+                        getattr(item, "tags", None), _topic_vocab)
 
                 def _passes_topic_filter(item) -> bool:
                     if not _passes_framework_filter(item):

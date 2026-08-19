@@ -68,6 +68,7 @@ INDEPENDENT_ACCEPTANCE = "acceptance-commands"
 INDEPENDENT_PRE_EXISTING = "pre-existing-tests"
 SELF_AUTHORED = "self-authored"
 PRE_EXISTING_FAILED = "pre-existing-tests-failed"
+ACCEPTANCE_FAILED = "acceptance-commands-failed"
 NO_TESTS = "no-tests"
 
 
@@ -380,6 +381,30 @@ def classify(root: str,
         return Evidence(True, INDEPENDENT_ACCEPTANCE,
                         f"{len(cmds)} user-supplied acceptance command(s) "
                         f"passed: {shown}")
+
+    if acceptance_passed is False:
+        # Louder than "unverified", and the mirror of PRE_EXISTING_FAILED
+        # below: the one instrument the model neither wrote nor can edit
+        # ran and DISAGREED. That says strictly more than absence of
+        # evidence, and it is the strongest negative signal this module
+        # can report.
+        #
+        # `False` used to fall through to the self-authored branch, whose
+        # advice is "Supply `acceptance_cmds` in .agentchanti.yaml" --
+        # addressed to a user who had already supplied them, about a run
+        # those very commands had just failed. Measured 2026-08-19 run
+        # 29: the acceptance check correctly failed an artifact whose
+        # login issued a `randomUUID()` token that no route ever
+        # verified, and the closing line read `Evidence: self-authored
+        # ... the run marked its own homework. Supply acceptance_cmds`.
+        # The verdict was right and the explanation of it was wrong in
+        # both halves.
+        shown = "; ".join(cmds[:2]) + (f" (+{len(cmds) - 2})"
+                                       if len(cmds) > 2 else "")
+        return Evidence(False, ACCEPTANCE_FAILED,
+                        f"{len(cmds)} user-supplied acceptance command(s) "
+                        f"ran and FAILED: {shown} - the one instrument this "
+                        f"run neither wrote nor can edit disagrees with it")
 
     survivors = surviving_pre_existing_tests(root, snapshot)
     if survivors:

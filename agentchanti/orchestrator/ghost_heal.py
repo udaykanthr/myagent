@@ -316,10 +316,21 @@ def _heal_packages(h: GhostHealer, exp) -> Optional[HealResult]:
     base = os.path.basename(manifest).lower()
 
     if base == "package.json":
-        missing = _missing_node_deps(h.ghost.root, text)
+        # The install must run where the manifest lives, for the same
+        # reason the check reads that directory's node_modules: `npm
+        # install` at the repo root writes a root package.json and a root
+        # node_modules, neither of which is the environment the app runs
+        # in. Observed installing the backend's four dependencies and the
+        # frontend's three at the top level while both sub-projects
+        # already had them correctly installed.
+        pkg_dir = os.path.dirname(manifest)
+        missing = _missing_node_deps(
+            os.path.join(h.ghost.root, pkg_dir), text)
         if not missing:
             return None
         cmd = "npm install " + " ".join(missing)
+        if pkg_dir:
+            cmd = f"npm --prefix {pkg_dir} install " + " ".join(missing)
     else:
         missing = _missing_python_deps(h.ghost.root, text)
         if not missing:

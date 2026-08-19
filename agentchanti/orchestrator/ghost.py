@@ -1406,7 +1406,17 @@ def _check_packages(root: str, manifest: str,
             return UNKNOWN, "manifest is not readable JSON"
         if not deps:
             return INAPPLICABLE, "no runtime dependencies declared"
-        node_modules = os.path.join(root, "node_modules")
+        # Node resolves from the manifest's OWN directory, so that is the
+        # environment this manifest describes. Looking in the repo root
+        # instead is wrong for every multi-root layout: measured
+        # 2026-08-19, `backend/node_modules` held all 101 packages and
+        # `frontend/node_modules` all 93, yet both manifests were judged
+        # against the root and reported VIOLATED — after which the healer
+        # installed both dependency sets at the top level, creating a
+        # `package.json`, a lockfile and a 107-package `node_modules` that
+        # belong to no project in the repo.
+        pkg_dir = os.path.join(root, os.path.dirname(manifest))
+        node_modules = os.path.join(pkg_dir, "node_modules")
         if not os.path.isdir(node_modules):
             return UNKNOWN, "no node_modules — cannot tell what is installed"
         missing = [d for d in deps

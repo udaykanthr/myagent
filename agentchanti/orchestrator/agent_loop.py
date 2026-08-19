@@ -687,10 +687,52 @@ def commands_equivalent_modulo_flags(candidate: str | None,
     return bool(a) and a == b
 
 
+def _npm_package_dir(project_root: str,
+                     planned_files: list[str] | None) -> str:
+    """Directory of the ``package.json`` that owns *planned_files*, or ``""``.
+
+    Node resolves dependencies from the manifest's own directory, so a
+    step writing ``backend/routes/auth.js`` needs its packages in
+    ``backend/``, whatever the repo root happens to contain. Walks up from
+    each file to the nearest manifest and requires the answer to be
+    unanimous — a step spanning two packages has no single right target,
+    and the caller's existing behaviour is the safer answer there.
+
+    Returns ``""`` for the repo root itself, so callers can treat "root"
+    and "unknown" identically: both mean "add no --prefix".
+    """
+    dirs: set[str] = set()
+    for f in planned_files or []:
+        if not f:
+            continue
+        parts = f.replace("\\", "/").strip("/").split("/")[:-1]
+        while True:
+            rel = "/".join(parts)
+            manifest = os.path.join(project_root, rel, "package.json")
+            if os.path.isfile(manifest):
+                dirs.add(rel)
+                break
+            if not parts:
+                break
+            parts = parts[:-1]
+    if len(dirs) != 1:
+        return ""
+    return dirs.pop()
+
+
+def _run_install(tools: AgentTools, install_cmd: str) -> bool:
+    _logger.info("[AgentLoop] env self-heal: %s", install_cmd)
+    result = tools.execute(ToolCall(name="run_command",
+                                    arguments={"command": install_cmd},
+                                    id="env-heal"))
+    return result.startswith("exit: success")
+
+
 def attempt_env_self_heal(tools: AgentTools, verify_output: str,
                           language: str | None, healed: set[str],
                           verify_cmd: str | None = None,
-                          planned_files: list[str] | None = None) -> bool:
+                          planned_files: list[str] | None = None,
+                          target_files=None) -> bool:
     """Install a missing third-party dependency named in failing output.
 
     ``No module named X`` / ``Cannot find package 'X'`` are environment
@@ -712,6 +754,31 @@ def attempt_env_self_heal(tools: AgentTools, verify_output: str,
             return False
         healed.update(pkgs)
         install_cmd = "npm install -D " + " ".join(pkgs)
+        # Install beside the manifest that owns the failing step, not at
+        # the repo root. `_cd_prefix` below can only see a `cd` the GATE
+        # happens to carry, and a correct root-relative backend gate —
+        # `node -e "require('./backend/x')"` — carries none, so the heal
+        # landed at the top level. Measured 2026-08-19: a backend step
+        # missing `jsonwebtoken` and `supertest` installed both into a
+        # repo-root `node_modules`, leaving a `package.json` belonging to
+        # no project; the app only worked because Node walks up, and
+        # shipping `backend/` alone would break.
+        # The step's DECLARED TARGETS, not `planned_files` — the latter is
+        # the loop's reading list (`_loop_preload_paths` adds every file
+        # the step imports), so a backend step that reads a frontend
+        # module spans two packages, the unanimity rule declines, and the
+        # install falls back to the repo root. Measured 2026-08-19 run 13:
+        # `jsonwebtoken` correctly went to `backend/` for one step and to
+        # the root for the next, from the same loop, minutes apart.
+        _pkg_dir = _npm_package_dir(
+            getattr(tools, "project_root", "."),
+            list(target_files or ()) or planned_files)
+        if _pkg_dir:
+            install_cmd = (f"npm --prefix {_pkg_dir} install -D "
+                           + " ".join(pkgs))
+            _logger.info("[AgentLoop] env self-heal targets %s/ (the manifest "
+                         "owning this step), not the repo root", _pkg_dir)
+            return _run_install(tools, install_cmd)
     else:
         memory = getattr(tools, "_memory", None)
         project_files = list(memory.all_files()) if memory is not None else []
@@ -733,11 +800,7 @@ def attempt_env_self_heal(tools: AgentTools, verify_output: str,
         py_tok = f'"{py}"' if py != "python" else py
         install_cmd = f"{py_tok} -m pip install {mod}"
     install_cmd = _cd_prefix(verify_cmd) + install_cmd
-    _logger.info("[AgentLoop] env self-heal: %s", install_cmd)
-    result = tools.execute(ToolCall(name="run_command",
-                                    arguments={"command": install_cmd},
-                                    id="env-heal"))
-    return result.startswith("exit: success")
+    return _run_install(tools, install_cmd)
 
 
 def run_agent_loop(
@@ -1002,7 +1065,8 @@ def run_agent_loop(
         while (not result.startswith("exit: success")
                and attempt_env_self_heal(tools, result, language, healed,
                                          verify_cmd,
-                                         planned_files=preload_files)):
+                                         planned_files=preload_files,
+                                         target_files=required_files)):
             result = _verify_once()
         # Last, and only on a still-red verdict: the env self-heal above
         # can turn a red gate green by fixing the environment, and asking
@@ -1015,7 +1079,20 @@ def run_agent_loop(
         # counts as stalled. The digest is what makes the observation
         # evidence: it says the code under the gate really did change.
         nonlocal _stalled_reason
-        if _stalled_reason is None:
+        # A step that has not finished writing its declared targets is
+        # EXPECTED to fail its gate, identically, while the digest moves
+        # with every file it writes — which is the stall signature exactly.
+        # Measured 2026-08-19 run 19: a step declaring five components was
+        # cut short at `turns=5, write_file: 3`; its gate reads two of
+        # them, so until both existed the failure was a constant ENOENT
+        # naming the missing FILE rather than anything about the code. It
+        # was declared unmeasurable three times in one run, and a recovery
+        # loop then redid the work and passed the same gate. This is the
+        # false positive the check's own bias statement warns about — the
+        # kind that suppresses real work — so the observation is withheld
+        # until the step has produced everything it promised.
+        if _stalled_reason is None and not _missing_required(
+                tools, required_files):
             _stalled_reason = observe_gate_verdict(
                 verify_cmd, result, _artifact_digest())
         return result

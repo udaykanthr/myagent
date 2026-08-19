@@ -2007,7 +2007,7 @@ def unrunnable_gate_reason(cmd: str) -> Optional[str]:
     if not cmd:
         return None
     for structural in (_interpreter_target_error, _placeholder_error,
-                       _posix_idiom_error):
+                       _posix_idiom_error, _node_jsx_error):
         reason = structural(cmd)
         if reason:
             return reason
@@ -2020,6 +2020,48 @@ def unrunnable_gate_reason(cmd: str) -> Optional[str]:
         payload = groups.get(key)
         if payload:
             return check(_unescape_shell_quotes(payload))
+    return None
+
+
+_NODE_JSX_RE = re.compile(
+    r"""\bnode\b(?![^"']*\bvitest\b)[^\n]*?"""
+    r"""(?:import|require)\s*\(\s*['"][^'"]+\.(?:jsx|tsx)['"]""",
+    re.IGNORECASE)
+
+
+def _node_jsx_error(cmd):
+    """A gate asking bare Node to load a .jsx/.tsx module.
+
+    Structural, and permanently so: JSX is not JavaScript, and no version
+    of Node parses it — only a bundler or a transform-aware runner
+    (vitest, jest, tsx, babel-node) does. So no output of the step can
+    make this gate pass, which is exactly the bar the other structural
+    branches meet.
+
+    Measured 2026-08-19, gate::
+
+        cd frontend && node -e "import('./src/context/AuthContext.jsx')
+                                 .then(m=>{...})"
+
+    The step ran three full loops, 30 turns, and the agent's eventual
+    "fix" was to deform the toolchain rather than the code: it wrote
+    `frontend/jsx-loader.mjs` (an esbuild transform hook) and
+    `frontend/node.cmd` — a shim that SHADOWS the real `node` for
+    anything run from that directory. The run failed anyway. A gate that
+    can only be satisfied by replacing the interpreter is not measuring
+    the artifact.
+
+    Deliberately silent when the command already routes through a
+    transform-aware runner, since `node ... vitest` handles JSX fine.
+    """
+    if not cmd:
+        return None
+    if _NODE_JSX_RE.search(cmd):
+        return ("the gate asks Node to load a .jsx/.tsx module, which no "
+                "version of Node can parse - JSX needs a bundler or a "
+                "transform-aware runner. Assert against the file's text, "
+                "or run the project's test runner (vitest/jest), which "
+                "transforms JSX before importing it")
     return None
 
 

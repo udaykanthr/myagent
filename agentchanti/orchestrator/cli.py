@@ -4,6 +4,7 @@ CLI entry point — argument parsing and main execution flow.
 
 import argparse
 import os
+import re
 import sys
 import time
 from datetime import datetime
@@ -405,27 +406,106 @@ def _ghost_final_report(plan_steps, step_results, memory, language,
         log.debug("[Ghost] final report skipped: %s", exc)
 
 
+# A suite that collected nothing. Every runner says so in its own words,
+# and all of them exit 0 while doing it — `--passWithNoTests` is even an
+# explicit request for that. The verdict is therefore not readable from
+# the exit code, only from the output.
+_EMPTY_SUITE_RE = re.compile(
+    r"no test files found"          # vitest
+    r"|no tests ran"                # pytest
+    r"|collected 0 items"           # pytest
+    r"|no tests found"              # jest
+    r"|ran 0 tests"                 # unittest
+    r"|\[no test files\]"           # go test
+    r"|no tests to run",            # misc
+    re.IGNORECASE,
+)
+
+
+def _gate_scope(cmd: str) -> str:
+    """The directory *cmd* runs in, from a leading ``cd X &&``, else ``""``.
+
+    ``""`` is the repo root, which contains everything.
+    """
+    m = re.match(r"^\s*cd\s+([^\s&|;]+)\s*&&", cmd or "")
+    if not m:
+        return ""
+    return m.group(1).strip("\"'").replace("\\", "/").strip("./").rstrip("/")
+
+
+def _suite_covers(suite_cmd: str, gate_cmd: str) -> bool:
+    """Whether *suite_cmd* could have exercised what *gate_cmd* checks.
+
+    Decided by working directory, which is the one thing both commands
+    always state. A suite rooted at the repo covers everything; a suite
+    rooted in ``frontend/`` says nothing whatsoever about a gate that
+    runs at the root against ``backend/``.
+    """
+    suite_scope = _gate_scope(suite_cmd)
+    if not suite_scope:
+        return True
+    gate_scope = _gate_scope(gate_cmd)
+    return gate_scope == suite_scope or gate_scope.startswith(suite_scope + "/")
+
+
 def _green_suites_contradicting(regressions) -> list[tuple[str, str]]:
     """Green suite gates that a rollback would sacrifice, else ``[]``.
 
     Returns non-empty only when ALL of:
     - a test-suite gate is recorded and is NOT among the regressions, and
-    - no regressing gate is itself a suite.
+    - no regressing gate is itself a suite, and
+    - that suite actually **ran tests**, and
+    - that suite **could have covered** the gate it is overruling.
 
-    Both conditions matter. A red suite means the stage broke real
-    behaviour and ordinary rollback is right; this is strictly the case
-    where inline assertions and the suite disagree and the suite wins.
-    Returning [] is always the safe answer — the caller rolls back as
-    before.
+    The first two conditions were the original rule. A red suite means the
+    stage broke real behaviour and ordinary rollback is right; this is
+    strictly the case where inline assertions and the suite disagree and
+    the suite wins.
+
+    The last two come from a measured false verdict (2026-08-19). The
+    claim being made here is strong — "the suite encodes the task's stated
+    invariants, so the gate is the suspect" — and it was made on behalf of
+    `cd frontend && npm run test -- --run`, whose script the agent had
+    written as `vitest --passWithNoTests --run` and which found **no test
+    files at all**. It overruled a real gate on `backend/services/
+    authValidation.js`, a file two directories outside anything it could
+    have run, and told the reader to go fix a `verify:` line that was
+    correct. The gate was red because a dependency-fix round had rewritten
+    that CommonJS module into ESM and dropped its exports — a genuine
+    regression, correctly detected, and dismissed.
+
+    A suite earns authority over a gate by having run something, and by
+    having run something that could have covered it. Returning [] is
+    always the safe answer — the caller rolls back as before.
     """
     from .wave_snapshots import get_gate_ledger, is_suite_gate
 
     failed = {cmd for cmd, _label, _out in regressions}
     if any(is_suite_gate(cmd) for cmd in failed):
         return []
-    return [(cmd, label)
-            for cmd, label in get_gate_ledger().gates().items()
-            if is_suite_gate(cmd) and cmd not in failed]
+
+    ledger = get_gate_ledger()
+    contradicting: list[tuple[str, str]] = []
+    for cmd, label in ledger.gates().items():
+        if not is_suite_gate(cmd) or cmd in failed:
+            continue
+        out = ledger.last_output(cmd) or ""
+        if _EMPTY_SUITE_RE.search(out):
+            log.warning(
+                "[Monotonic] suite gate (%s) collected no tests, so it "
+                "cannot overrule a failing gate: %s",
+                label or "?", cmd)
+            continue
+        uncovered = [c for c in failed if not _suite_covers(cmd, c)]
+        if uncovered:
+            log.warning(
+                "[Monotonic] suite gate (%s) runs in '%s/' and cannot have "
+                "exercised %d failing gate(s) outside it: %s",
+                label or "?", _gate_scope(cmd) or ".", len(uncovered),
+                "; ".join(uncovered))
+            continue
+        contradicting.append((cmd, label))
+    return contradicting
 
 
 def _enforce_monotonic_gates(snapshots, executor, stage: str,
@@ -530,6 +610,18 @@ def _enforce_monotonic_gates(snapshots, executor, stage: str,
     set_status(display, f"Rolling back — {stage} left gate(s) red")
     log.warning("[Monotonic] %s left %d gate(s) red: %s",
                 stage, len(regressions), _names(regressions))
+    # A rollback is the most destructive thing this pipeline does — it
+    # discards a whole wave of work and fails the run — and until now the
+    # log recorded only WHICH gate went red, never WHY. `recheck` has
+    # captured the failing output all along (`(out or "")[-1500:]`) and
+    # `_names` dropped it on the floor, so a reader saw `output=810
+    # chars` in the executor line and nothing else. Two separate
+    # investigations of a rolled-back run (2026-08-19 runs 18 and 20)
+    # could not determine the cause from the log, and the rollback had
+    # already deleted the files needed to reproduce it by hand.
+    for _cmd, _label, _out in regressions:
+        log.warning("[Monotonic]   step %s output:\n%s",
+                    _label or "?", (_out or "(no output captured)").strip())
     rb_ok, rb_msg = snapshots.rollback_to_last()
     if rb_ok:
         log.warning(
@@ -1881,11 +1973,73 @@ def _main_impl():
                         "no seeded independent evidence",
                         type(_seed_exc).__name__, _seed_exc)
 
-    from .evidence import snapshot_test_files as _snap_tests
+    from .evidence import (acceptance_instrument_files as _acc_files,
+                           snapshot_test_files as _snap_tests)
+    # Files the acceptance commands invoke are read-only to the agent for
+    # the rest of the run — see AgentTools._acceptance_refusal.
+    _acc_instruments = _acc_files(
+        getattr(cfg, "ACCEPTANCE_CMDS", []) or [], os.getcwd())
+    if _acc_instruments:
+        memory._acceptance_files = _acc_instruments
+        log.info("[Evidence] %d acceptance instrument(s) protected from "
+                 "agent writes: %s", len(_acc_instruments),
+                 ", ".join(sorted(_acc_instruments)))
     _pre_existing_tests = _snap_tests(os.getcwd())
     if _pre_existing_tests:
         log.info(f"[Evidence] {len(_pre_existing_tests)} pre-existing test "
                  f"file(s) recorded as independent evidence candidates")
+
+    # `require_independent_evidence` can be UNSATISFIABLE before the first
+    # step runs, and saying so now is the whole point. Independent evidence
+    # is exactly three things — user `acceptance_cmds`, a pre-existing test
+    # file the run leaves alone, or a contract the seeder wrote — and the
+    # seeder is Python-only (`SEED_BASENAME` is a .py, `evidence` filters
+    # `.py`, `seed_strength` is an AST analysis). A greenfield JavaScript
+    # build therefore has none of the three, no matter how well it goes.
+    #
+    # Measured 2026-08-19: a run executed all 20 steps, passed every gate,
+    # built clean and ran its suite green, then failed on the last line
+    # with "nothing outside this run's own output verified it" — 691k
+    # tokens to reach a verdict that was already decided at startup. The
+    # message reads like the model's fault; it is a configuration that
+    # cannot succeed. Warned rather than refused: the run's artifacts are
+    # still worth having, and the user may add `acceptance_cmds` and
+    # resume from the checkpoint.
+    if getattr(cfg, "REQUIRE_INDEPENDENT_EVIDENCE", False):
+        _have_acc = bool(getattr(cfg, "ACCEPTANCE_CMDS", []) or [])
+        _seedable = not language or language.lower() in ("python", "py")
+        if not (_have_acc or _pre_existing_tests or _seedable):
+            log.warning(
+                "[Evidence] require_independent_evidence is set, but nothing "
+                "can satisfy it in this run: no `acceptance_cmds` are "
+                "configured, no pre-existing test file was found, and the "
+                "acceptance seeder does not support %s (Python only). The "
+                "run will do its work and then exit non-zero regardless of "
+                "the result. Add `acceptance_cmds:` to .agentchanti.yaml — "
+                "a command the agent cannot edit — or unset "
+                "`require_independent_evidence`.", language)
+
+    # The top-level directories the final plan names as target roots. A
+    # sub-project root is otherwise a claim about the ONE tree the run
+    # builds, and everything downstream re-roots into it — CMD cwd, gate
+    # `cd` prefixes, unprefixed write paths. This set is what lets a
+    # multi-root plan ("React frontend + Express backend") say that
+    # `backend/` is a sibling of `frontend/`, not a directory inside it.
+    if plan_steps_parsed:
+        _declared_roots: set[str] = set()
+        for _ps in plan_steps_parsed:
+            for _t in getattr(_ps, "target_files", None) or []:
+                _norm = (_t or "").replace("\\", "/").lstrip("/")
+                while _norm.startswith("./"):
+                    _norm = _norm[2:]
+                if "/" in _norm:
+                    _head = _norm.split("/")[0]
+                    if _head and _head not in (".", ".."):
+                        _declared_roots.add(_head)
+        memory._plan_declared_roots = _declared_roots
+        if len(_declared_roots) > 1:
+            log.info("[Plan] Declares %d target root(s): %s",
+                     len(_declared_roots), ", ".join(sorted(_declared_roots)))
 
     if getattr(cfg, "GHOST_SHADOW", True) and plan_steps_parsed:
         # On a resume, the steps below `start_from` finished in an earlier

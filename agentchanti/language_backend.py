@@ -190,6 +190,10 @@ class PythonBackend(LanguageBackend):
         )
 
 
+# A JavaScript identifier — the shape any real export name has.
+_JS_IDENT_RE = re.compile(r'^[A-Za-z_$][\w$]*$')
+
+
 class JavaScriptBackend(LanguageBackend):
     language = "javascript"
     display_name = "JavaScript"
@@ -283,16 +287,59 @@ class JavaScriptBackend(LanguageBackend):
         return imports
 
     def extract_exports(self, content: str) -> list[str]:
-        exports = []
+        """Exported names, across the four spellings JS actually uses.
+
+        Every omission here reads downstream as a MISSING export, and the
+        ghost reports that as `violated-exports` — a finding that sends a
+        reader after code which is already correct. Measured 2026-08-19
+        run 16: `export async function apiRequest(...)` was reported
+        missing from a file that plainly exports it, because the pattern
+        had no `async` branch. `ghost.plan_anchors` has carried the
+        `async` case for some time; the two parsers simply disagreed, and
+        the verdict was decided by the weaker one.
+
+        The list form (`export { a, b as c }`) and the object form
+        (`module.exports = {a, b}`) were missing for the same reason —
+        the CommonJS pattern accepted only `= identifier`, so every
+        backend module in this project's own benchmark exported nothing
+        as far as this extractor was concerned.
+        """
+        exports: list[str] = []
+
+        def _add(name: str) -> None:
+            # Every branch below slices text out of a pattern match, so
+            # the one invariant worth enforcing centrally is that what
+            # survives is actually a name. Without it, CSS Modules'
+            # `:export { globalStyles: globalStyles; }` yielded the
+            # "export" `globalStyles: globalStyles;` — reported by the
+            # ghost as a file's exports, verbatim (2026-08-19 run 22).
+            if not name or not _JS_IDENT_RE.match(name):
+                return
+            if name not in exports:
+                exports.append(name)
+
         for m in re.finditer(
-            r'export\s+(?:default\s+)?(?:function|class|const|let|var)\s+(\w+)',
+            r'export\s+(?:default\s+)?(?:async\s+)?'
+            r'(?:function\s*\*?|class|const|let|var)\s+(\w+)',
             content,
         ):
-            exports.append(m.group(1))
+            _add(m.group(1))
+        # `export { a, b as c }` — the exported name is the one after `as`.
+        for m in re.finditer(r'(?<![:\w$])export\s*\{([^}]*)\}', content):
+            for part in m.group(1).split(","):
+                _add(part.split(" as ")[-1].strip().strip("\"'"))
         if re.search(r'export\s+default\s+', content):
-            exports.append("default")
-        for m in re.finditer(r'module\.exports\s*=\s*(\w+)', content):
-            exports.append(m.group(1))
+            _add("default")
+        for m in re.finditer(r'module\.exports\s*=\s*(\w+)\s*(?:;|$)',
+                             content, re.MULTILINE):
+            _add(m.group(1))
+        # `module.exports = { a, b: c }` / `exports.name = ...`
+        for m in re.finditer(r'module\.exports\s*=\s*\{([^}]*)\}',
+                             content, re.DOTALL):
+            for part in m.group(1).split(","):
+                _add(part.split(":")[0].strip())
+        for m in re.finditer(r'(?:module\.)?exports\.(\w+)\s*=', content):
+            _add(m.group(1))
         return exports
 
     def get_config_candidates(self) -> list[str]:

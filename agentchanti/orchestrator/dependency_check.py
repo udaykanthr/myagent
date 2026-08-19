@@ -8,6 +8,7 @@ and a single LLM call to fix all detected gaps.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -1508,6 +1509,98 @@ Do NOT change the callee's definition — only fix the call site(s).
 """
 
 
+def _module_system_of(fpath: str, memory_files: dict) -> str | None:
+    """``"esm"``/``"cjs"`` for one JS file, or None when nothing decides it.
+
+    Node decides this per file, from the nearest ``package.json`` — not
+    once per repo. A monorepo with a Vite frontend (``"type": "module"``)
+    beside an Express backend (``"type": "commonjs"``) is two answers,
+    and the file's own directory is the one that knows which.
+
+    Order: an explicit ``.mjs``/``.cjs`` extension, then the nearest
+    manifest (a manifest with no ``type`` still bounds the package, and
+    Node defaults it to CommonJS), then the file's own syntax.
+    """
+    norm = (fpath or "").replace("\\", "/").strip("/")
+    if norm.endswith(".mjs"):
+        return "esm"
+    if norm.endswith(".cjs"):
+        return "cjs"
+
+    parts = norm.split("/")[:-1]
+    while True:
+        manifest = "/".join(parts + ["package.json"]) if parts else "package.json"
+        raw = memory_files.get(manifest)
+        if raw is None and os.path.isfile(manifest):
+            try:
+                with open(manifest, "r", encoding="utf-8", errors="replace") as fh:
+                    raw = fh.read()
+            except OSError:
+                raw = None
+        if raw:
+            try:
+                declared = json.loads(raw).get("type")
+            except (ValueError, AttributeError):
+                declared = None
+            if declared == "module":
+                return "esm"
+            return "cjs"
+        if not parts:
+            break
+        parts = parts[:-1]
+
+    content = memory_files.get(fpath, "") or ""
+    if "require(" in content:
+        return "cjs"
+    if "import " in content and " from " in content:
+        return "esm"
+    return None
+
+
+_MODULE_SYSTEM_RULE = {
+    "esm": "ES Modules (import/export) — use ESM syntax",
+    "cjs": "CommonJS (require/module.exports) — use CJS syntax",
+}
+
+
+def _module_system_note(relevant_files, memory_files: dict) -> str:
+    """The module-system instruction for a dependency-fix prompt.
+
+    Measured 2026-08-19: this was one run-wide ``any("import " in c ...)``
+    over every file in memory, so a single React component anywhere made
+    the answer ESM for the whole repo — and the CommonJS branch sat in an
+    ``elif`` it could never reach. The fix prompt for a CommonJS Express
+    module was told "Project uses ES Modules", rewrote its
+    ``module.exports = {...}`` into ``export function``, and dropped every
+    declared export. Its previously green gate went red twice, and the
+    monotonic check read that as the GATE being wrong and told the reader
+    to go fix the plan's verify line.
+
+    Files that disagree are named individually rather than averaged: in a
+    two-root repo the average is wrong for one of the roots, and picking
+    either silently corrupts the other.
+    """
+    # With no gaps there are no relevant files; fall back to everything
+    # in memory so a caller asking about the repo as a whole still gets
+    # an answer (the per-file listing below then covers a mixed repo).
+    targets = sorted(relevant_files) or [
+        f for f in sorted(memory_files)
+        if f.rsplit(".", 1)[-1] in ("js", "jsx", "ts", "tsx", "mjs", "cjs")
+    ]
+    systems = {f: _module_system_of(f, memory_files) for f in targets}
+    known = {v for v in systems.values() if v}
+    if not known:
+        return "Unknown module system."
+    if len(known) == 1:
+        return f"Project uses {_MODULE_SYSTEM_RULE[known.pop()]}."
+    lines = ["This repo mixes module systems — each file below keeps the one "
+             "its own package.json declares. Do NOT convert a file from one "
+             "to the other:"]
+    lines += [f"  - {f}: {_MODULE_SYSTEM_RULE[v]}"
+              for f, v in systems.items() if v]
+    return "\n".join(lines)
+
+
 def build_fix_prompt(
     gaps: list[IntegrationGap],
     memory_files: dict[str, str],
@@ -1536,15 +1629,10 @@ def build_fix_prompt(
             file_parts.append(f"#### [FILE]: {fpath}\n```\n{content}\n```")
     files_formatted = "\n\n".join(file_parts)
 
-    # Detect module system
+    # Detect module system — per file, from the nearest manifest.
     module_system_note = "Unknown module system."
     if language in ("javascript", "typescript"):
-        has_esm = any("import " in c and " from " in c for c in memory_files.values())
-        has_cjs = any("require(" in c for c in memory_files.values())
-        if has_esm:
-            module_system_note = "Project uses ES Modules (import/export). Use ESM syntax."
-        elif has_cjs:
-            module_system_note = "Project uses CommonJS (require/module.exports). Use CJS syntax."
+        module_system_note = _module_system_note(relevant_files, memory_files)
     elif language == "python":
         module_system_note = "Python project. Use standard import syntax."
     elif language == "go":

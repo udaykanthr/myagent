@@ -49,6 +49,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import re
 from dataclasses import dataclass
 from typing import Iterable, Optional
 
@@ -121,6 +122,42 @@ def _digest(path: str) -> Optional[str]:
             return hashlib.sha256(fh.read()).hexdigest()
     except OSError:
         return None
+
+
+def acceptance_instrument_files(cmds, root: str = ".") -> set[str]:
+    """Existing files the acceptance commands invoke, relative to *root*.
+
+    `acceptance_cmds` is the only check in a run that the model did not
+    write. That holds absolutely for the command STRING, which lives in
+    config the model cannot reach — and did not hold at all for a command
+    that invokes a file, which sits in the project root like any other
+    source. This names those files so the agent's tools can refuse to
+    write them.
+
+    Deliberately conservative: a token counts only when it resolves to a
+    file that already exists, so `npm --prefix frontend run build`
+    contributes nothing while `node acceptance_check.cjs` contributes the
+    script. Protecting a path that does not exist would block the run from
+    creating an ordinary file that merely shares a name with a token.
+    """
+    found: set[str] = set()
+    for cmd in cmds or ():
+        for tok in re.split(r"[\s;|&<>()]+", str(cmd or "")):
+            tok = tok.strip("\"'")
+            if not tok or tok.startswith("-"):
+                continue
+            norm = tok.replace("\\", "/")
+            while norm.startswith("./"):
+                norm = norm[2:]
+            norm = norm.lstrip("/")
+            if not norm or norm in (".", ".."):
+                continue
+            try:
+                if os.path.isfile(os.path.join(root, norm)):
+                    found.add(norm)
+            except (OSError, ValueError):
+                continue
+    return found
 
 
 def snapshot_test_files(root: str) -> dict[str, str]:

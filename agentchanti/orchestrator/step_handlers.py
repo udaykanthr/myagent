@@ -1230,6 +1230,91 @@ def _dir_imported_as_package(all_files, subproject: str) -> bool:
     return False
 
 
+def _step_belongs_to_subproject(plan_step, subproject: str,
+                                memory: FileMemory) -> bool | None:
+    """Whether *plan_step*'s files live under *subproject*, or None if unknown.
+
+    A detected sub-project root is a claim about ONE tree, and the whole
+    pipeline treats it as the tree: CMD commands are re-rooted into it,
+    gates get a ``cd {sub} &&`` prefix, unprefixed paths get prefixed.
+    That is right for `npx create-next-app my-app` and wrong the moment
+    a plan declares a second root beside it.
+
+    Measured 2026-08-19 on a "React frontend + Express backend" task. Step
+    1.1 scaffolded ``frontend/``; step 1.2's ``mkdir backend && cd backend
+    && npm init -y`` matched the ``npm init`` routing pattern and ran with
+    cwd=``frontend``, so the backend was built at ``frontend/backend/``.
+    Every later backend gate was prefixed ``cd frontend &&`` and read the
+    same wrong copy, so the misroute was self-consistent and nothing
+    disagreed — all four backend gates passed green. The run ended with
+    the backend on disk twice: ``frontend/backend/`` holding the installed
+    ``node_modules``, and the declared ``backend/`` holding no
+    dependencies at all and unable to start.
+
+    The discriminator is the plan's own vocabulary. ``_plan_declared_roots``
+    holds the top-level directories the plan names, and *subproject* being
+    one of them is the proof that these paths are repo-root-relative: a
+    planner that writes ``frontend/src/App.jsx`` is not also writing
+    ``backend/`` to mean ``frontend/backend/``. Only then is a step's
+    declared target trusted to say which root it belongs to.
+
+    Returns None — never a guess — when the plan does not name the
+    sub-project or the step declares no targets, which is the ordinary
+    single-scaffold case and keeps its existing behaviour exactly.
+    """
+    sibs = _plan_sibling_roots(memory, subproject)
+    if sibs is None:
+        return None
+    targets = list(getattr(plan_step, "target_files", None) or [])         if plan_step is not None else []
+    if not targets:
+        return None
+    prefix = subproject.replace("\\", "/").rstrip("/") + "/"
+    # EVERY target must live under the sub-project, not merely one of
+    # them. Re-rooting is only correct when the whole step does, because
+    # `cd {sub}` breaks every path that does not — while a root-relative
+    # command is correct for all of them.
+    #
+    # Measured 2026-08-19 run 13, step 8.1 with
+    # `target: backend/.env.example, frontend/.env.example, README.md`.
+    # Under `any()` it read as "belongs to frontend", so its gate ran as
+    # `cd frontend && node -e "...readFileSync('backend/.env.example')
+    # ...readFileSync('README.md')..."` — pointing at two files that do
+    # not exist. The agent satisfied it by CREATING them:
+    # `frontend/backend/.env.example` and `frontend/README.md`, both
+    # reported by the ghost as unplanned writes. That is the same
+    # manufacture-the-path-the-gate-names failure as run 2's
+    # `frontend/frontend/package.json`.
+    return all(_norm_rel(t).startswith(prefix) for t in targets)
+
+
+def _norm_rel(path: str) -> str:
+    """``path`` with backslashes and a leading ``./`` normalised away."""
+    norm = (path or "").replace("\\", "/").lstrip("/")
+    while norm.startswith("./"):
+        norm = norm[2:]
+    return norm
+
+
+def _plan_sibling_roots(memory: FileMemory,
+                        subproject: str | None) -> set[str] | None:
+    """Top-level roots the plan declares BESIDE *subproject*, or None.
+
+    None means "the plan's paths are not known to be repo-root-relative",
+    which is the ordinary single-scaffold case: a planner that writes
+    ``src/App.jsx`` for a project living under ``my-app/`` expects the
+    prefix to be applied, and nothing here should second-guess it. The
+    proof that a plan is root-relative is that it names *subproject*
+    itself as a target root — see `_step_belongs_to_subproject`.
+    """
+    if not subproject:
+        return None
+    roots = getattr(memory, "_plan_declared_roots", None)
+    sub = subproject.replace("\\", "/").rstrip("/")
+    if not roots or sub not in roots:
+        return None
+    return {r for r in roots if r != sub}
+
+
 def _detect_subproject_root(memory: FileMemory) -> str | None:
     """Detect if all project files share a common subdirectory prefix.
 
@@ -1600,6 +1685,12 @@ def _prefix_subproject_paths(files: dict[str, str],
     proj_name_norm = _normalize_proj_name(proj_name)
     known_paths = set(memory.all_files().keys())
     corrected: dict[str, str] = {}
+    # Roots the plan names beside this one. Non-empty only when the plan
+    # is provably root-relative, in which case `backend/app.js` means the
+    # repo's backend and prefixing it to `frontend/backend/app.js` builds
+    # a second, undeclared tree — the classic-path twin of the CMD
+    # misroute described in `_step_belongs_to_subproject`.
+    _sibling_roots = _plan_sibling_roots(memory, subproject) or set()
 
     # Internal tracking directories that should never be prefixed
     _INTERNAL_PREFIXES = ('_cmd_output/', '_fix_output/', '_search_context/')
@@ -1614,6 +1705,16 @@ def _prefix_subproject_paths(files: dict[str, str],
         # Windows paths like 'my-app\src\foo.js' match 'my-app/')
         norm_fpath = fpath.replace("\\", "/")
         if norm_fpath.startswith(prefix):
+            corrected[fpath] = content
+            continue
+
+        # Declared under a sibling root the plan named itself — this path
+        # is repo-root-relative and already where it belongs.
+        _leader = norm_fpath.split('/')[0]
+        if _leader in _sibling_roots:
+            log.debug("[SubProject] Left '%s' at the repo root — '%s/' is a "
+                      "plan-declared root beside '%s/'",
+                      fpath, _leader, proj_name)
             corrected[fpath] = content
             continue
 
@@ -2113,8 +2214,17 @@ def _handle_cmd_step(step_text: str, executor: Executor,
 
     # ── Idempotency check ──
     # Detect the subproject root early so idempotency checks resolve
-    # paths relative to the correct directory.
+    # paths relative to the correct directory. It must be the SAME
+    # directory the command will actually run in, decided below: this
+    # check answers "is `npm install express` already satisfied?" by
+    # looking for `node_modules/express`, and answering it about
+    # `frontend/` while the command runs at the repo root would skip a
+    # backend install because the frontend happened to have the package.
+    # A wrong answer here does not merely mis-report — it SKIPS the work.
     _early_cwd = _detect_subproject_root(memory) or None
+    if _early_cwd and _step_belongs_to_subproject(
+            plan_step, _early_cwd, memory) is False:
+        _early_cwd = None
     cmd, skip_reason = _make_cmd_idempotent(cmd, executor, cwd=_early_cwd)
     if cmd is None:
         log.info(f"Step {step_idx+1}: Skipping redundant command — {skip_reason}")
@@ -2142,7 +2252,18 @@ def _handle_cmd_step(step_text: str, executor: Executor,
         )
         # Don't set cwd if the command already includes a `cd` to the subproject
         already_has_cd = f'cd {subproject}' in cmd or f'cd ./{subproject}' in cmd
-        if needs_subproject and not already_has_cd:
+        # A step the plan places under a SIBLING root must not be re-rooted
+        # here. `mkdir backend && cd backend && npm init -y` matches the
+        # `npm init` pattern above, and running it with cwd=frontend built
+        # the whole Express backend inside the React app — see
+        # `_step_belongs_to_subproject` for the measured run.
+        _belongs = _step_belongs_to_subproject(plan_step, subproject, memory)
+        if needs_subproject and _belongs is False:
+            log.info(f"Step {step_idx+1}: NOT running in sub-project "
+                     f"{subproject}/ — the plan declares this step's target(s) "
+                     f"under a sibling root "
+                     f"({', '.join(plan_step.target_files[:3])})")
+        elif needs_subproject and not already_has_cd:
             subproject_cwd = subproject
             log.info(f"Step {step_idx+1}: Running command in sub-project: "
                      f"{subproject}/")
@@ -4142,9 +4263,24 @@ def _declared_verify_cmd(plan_step, memory: FileMemory,
         _sub_re = re.escape(sub.rstrip("/\\"))
         _imports_sub = re.search(rf"\b(?:import|from)\s+{_sub_re}\b",
                                  cmd) is not None
+        # The leading class must admit path separators and `.`. The shape
+        # that actually occurs is `require('./frontend/package.json')`,
+        # where the character before the name is `/`, not a quote — so a
+        # correct root-relative gate was read as making no reference to
+        # `frontend` and became `cd frontend && ...'./frontend/...'`,
+        # which nothing can satisfy. The recovery loop then satisfied it
+        # by creating `frontend/frontend/package.json`, which is exactly
+        # the duplicate nested package this guard exists to prevent.
         _references_sub = re.search(
-            rf"(?:^|[\s\"'=]){_sub_re}(?:[\\/.\s\"']|$)", cmd) is not None
-        if not (_root_relative_venv or _imports_sub or _references_sub):
+            rf"(?:^|[\s\"'=./\\]){_sub_re}(?:[\\/.\s\"']|$)", cmd) is not None
+        # A gate on a step the plan places under a SIBLING root is written
+        # for the repo root, and `cd {sub}` silently redirects it to a
+        # path that may well exist: `node -e "require('./backend/...')"`
+        # prefixed with `cd frontend` read frontend/backend/ and passed,
+        # which is how a whole misrouted backend went unnoticed.
+        _sibling_root = _step_belongs_to_subproject(plan_step, sub, memory) is False
+        if not (_root_relative_venv or _imports_sub or _references_sub
+                or _sibling_root):
             cmd = f"cd {sub} && {cmd}"
     return cmd
 

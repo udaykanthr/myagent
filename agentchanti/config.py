@@ -79,6 +79,9 @@ _DEFAULTS = {
     "wave_snapshots": True,
     "ghost_shadow": True,
     "require_independent_evidence": False,
+    # Rounds of repair allowed when a user acceptance command fails.
+    # 0 disables retrying entirely (the pre-2026-08-20 behaviour).
+    "acceptance_repair_rounds": 3,
     "seed_acceptance_tests": True,
     "ghost_heal": True,
     "ghost_heal_source_edits": True,
@@ -470,6 +473,9 @@ class Config:
         self.REQUIRE_INDEPENDENT_EVIDENCE = _get_bool(
             "REQUIRE_INDEPENDENT_EVIDENCE", "require_independent_evidence",
             _DEFAULTS["require_independent_evidence"])
+        self.ACCEPTANCE_REPAIR_ROUNDS = _get(
+            "ACCEPTANCE_REPAIR_ROUNDS", "acceptance_repair_rounds",
+            _DEFAULTS["acceptance_repair_rounds"], cast=int)
         self.SEED_ACCEPTANCE_TESTS = _get_bool(
             "SEED_ACCEPTANCE_TESTS", "seed_acceptance_tests",
             _DEFAULTS["seed_acceptance_tests"])

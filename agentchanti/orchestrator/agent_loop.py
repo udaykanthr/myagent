@@ -1625,8 +1625,23 @@ def build_step_tools(executor, memory, kb_context_builder=None,
     """Assemble :class:`AgentTools` from the objects a step handler holds."""
     searcher = getattr(kb_context_builder, "_searcher", None) \
         if kb_context_builder is not None else None
-    return AgentTools(project_root=project_root, executor=executor,
-                      searcher=searcher, memory=memory)
+    tools = AgentTools(project_root=project_root, executor=executor,
+                       searcher=searcher, memory=memory)
+    # The acceptance guard rides on FileMemory (the route
+    # `_plan_declared_roots` takes, since this function has no cfg) and has
+    # to be transferred onto every AgentTools built from it. Without this
+    # the whole mechanism was INERT in production: cli.py set
+    # `memory._acceptance_files`, `_acceptance_refusal` read
+    # `self._acceptance_files`, and nothing connected them —
+    # `protect_acceptance_files` was called only from a test, which is
+    # exactly why the test passed while a real run could overwrite its own
+    # frozen contract. It matters most now that a failing acceptance
+    # command is retried: until that landed, nothing in the run had any
+    # incentive to touch the check, because it ran once with nothing after
+    # it. Retrying until green makes rewriting the contract the cheapest
+    # path to green, so this must hold before that loop exists.
+    tools.protect_acceptance_files(getattr(memory, "_acceptance_files", None))
+    return tools
 
 
 def agent_loop_enabled(cfg, llm_client) -> bool:

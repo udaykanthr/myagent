@@ -289,6 +289,96 @@ def rootless_npm_install_reason(command: str, project_root: str) -> str | None:
         f"`npm --prefix {subs[0]} install {pkgs}`.")
 
 
+def phantom_root_manifest_reason(rel_path: str, project_root: str,
+                                 declared: "set[str] | None" = None) -> "str | None":
+    r"""Why writing this root ``package.json`` would manufacture a phantom package.
+
+    `rootless_npm_install_reason` refuses `npm install <pkg>` at a root
+    that owns no manifest, because npm would CREATE one and leave a
+    top-level package belonging to no project. That guard has an escape
+    hatch -- if the root really is a package, the install is fine -- and
+    the escape hatch was **agent-writable**.
+
+    Measured 2026-08-19 run 28. Step 5.1's gate did `require('jsonwebtoken')`
+    from the repo root, where it cannot resolve: the package lives in
+    `backend/node_modules`. The env self-heal correctly installed into
+    `backend/`, which did not help a root-level require, and the gate
+    then failed six times over two artifacts. Everything upstream got it
+    right -- `gate STALLED ... the gate is not measuring the artifact`,
+    then `NOT escalating - the gate is the defect, not the code`, and
+    `refused rootless npm install: npm install jsonwebtoken --no-save`.
+
+    On the very next turn the agent wrote a root `package.json` with
+    `write_file`, and the recovery loop then ran
+    `npm install jsonwebtoken --save`, which the npm guard permitted
+    because a root manifest now existed. The file it wrote --
+    `{"name": "fullstack-auth-project", "private": true, "dependencies":
+    {"jsonwebtoken": "^9.0.3"}}` -- is plainly hand-authored: `npm init
+    -y` names the directory and emits version/main/scripts.
+
+    The harm was not hypothetical and nothing reported it. The stray root
+    manifest SHADOWED the frontend's, so `[SmokeTest] JS build check: npm
+    run build (cwd=frontend)` became `[SmokeTest] No build script in
+    package.json - skipping`, silently disabling the build and
+    style-coupling checks that had run in the previous run. Both
+    acceptance instruments still passed, because neither looks at the
+    repo root.
+
+    This is the sixth recorded instance of an unsatisfiable gate being
+    answered by deforming the project rather than the code, after
+    frontend/frontend/package.json, frontend/node.cmd,
+    frontend/backend/.env.example, frontend/frontend/src/pages/*.jsx and
+    the `mklink /J node_modules` junction.
+
+    Narrow by construction, and by the same shape as the npm guard: it
+    fires only when the root owns no manifest *and* some immediate
+    subdirectory does -- the multi-root layout. A greenfield root install
+    has no sibling manifests and is left alone; so is a root that already
+    owns a manifest. And a target the PLAN declared is always allowed,
+    because a workspaces root someone planned is a real decision, not an
+    agent working around a measurement.
+    """
+    import os
+
+    norm = (rel_path or "").replace("\\", "/").lstrip("/")
+    while norm.startswith("./"):
+        norm = norm[2:]
+    if norm.lower() != "package.json":
+        return None                      # only the ROOT manifest
+    if norm in (declared or set()):
+        return None                      # the plan asked for it
+    if os.path.isfile(os.path.join(project_root, "package.json")):
+        return None                      # editing an existing root package
+
+    subs = []
+    try:
+        for entry in sorted(os.scandir(project_root), key=lambda e: e.name):
+            if not entry.is_dir() or entry.name.startswith("."):
+                continue
+            if entry.name == "node_modules":
+                continue
+            if os.path.isfile(os.path.join(entry.path, "package.json")):
+                subs.append(entry.name)
+    except OSError:
+        return None
+    if not subs:
+        return None                      # nothing better to suggest
+
+    return (
+        "ERROR: refusing to create a top-level package.json. The real "
+        "package(s) are: " + ", ".join(subs) + ", and no plan step "
+        "declares a root manifest. A package.json here belongs to no "
+        "project: it shadows the sub-projects' own manifests (a root one "
+        "with no build script silently disables the frontend build "
+        "check), and it makes a root `npm install` look legitimate when "
+        "it is not.\n"
+        "If a gate cannot resolve a package because it runs in the wrong "
+        "directory, that is a defect in the GATE - run it where the "
+        "manifest that owns the dependency lives, e.g. "
+        "`npm --prefix " + subs[0] + " ...`, or say so in your summary. "
+        "Do not give the root a manifest to make the gate pass.")
+
+
 _DEP_DIR_NAMES = frozenset({"node_modules", "site-packages", "vendor",
                             "bower_components"})
 
@@ -701,6 +791,12 @@ class AgentTools:
         refusal = self._acceptance_refusal(path, rel)
         if refusal is not None:
             return refusal
+        phantom = phantom_root_manifest_reason(
+            rel, self.project_root,
+            getattr(self._memory, "_plan_declared_files", None))
+        if phantom is not None:
+            log.warning("[AgentTools] refused phantom root manifest '%s'", rel)
+            return phantom
         shim = toolchain_shim(rel)
         if shim is not None:
             log.warning("[AgentTools] refused toolchain shim '%s' (would "

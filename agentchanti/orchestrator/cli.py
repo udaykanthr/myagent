@@ -2037,6 +2037,15 @@ def _main_impl():
                     if _head and _head not in (".", ".."):
                         _declared_roots.add(_head)
         memory._plan_declared_roots = _declared_roots
+        # Every declared target, not just its leading directory. A write
+        # the plan asked for is planned however unusual it looks, which
+        # is what keeps `phantom_root_manifest_reason` from refusing a
+        # legitimate workspaces root.
+        memory._plan_declared_files = {
+            (_t or "").replace(chr(92), "/").lstrip("/").lstrip("./")
+            for _ps in plan_steps_parsed
+            for _t in (getattr(_ps, "target_files", None) or [])
+        }
         if len(_declared_roots) > 1:
             log.info("[Plan] Declares %d target root(s): %s",
                      len(_declared_roots), ", ".join(sorted(_declared_roots)))

@@ -261,6 +261,20 @@ Two findings from the run that first passed end to end, 2026-08-19.
 
 The bound is that the **source module is never evidence about its own consumers**: it declares the very symbols being searched for and owns the stem, so counting it turns every unwired edge into a pass. The first cut did exactly that and the pre-existing `test_unwired_import_edge_is_violated` caught it — `board.py` vouching for a `main.py` that ignored it.
 
+### A Guard Whose Precondition the Agent Can Write (agent_tools.py `phantom_root_manifest_reason`)
+
+`rootless_npm_install_reason` refuses `npm install <pkg>` at a root that owns no manifest, because npm would CREATE one and leave a top-level package belonging to no project. It has an escape hatch — if the root really *is* a package, the install is fine — and that hatch was **agent-writable**.
+
+Measured 2026-08-19 run 28. Step 5.1's gate did `require('jsonwebtoken')` from the repo root, where it cannot resolve: the package lives in `backend/node_modules`. Every existing check got it right. The env self-heal installed into `backend/` (correct, and useless to a root-level require); `gate_integrity` declared `gate STALLED — the gate is not measuring the artifact` and then `NOT escalating — the gate is the defect, not the code`; and the install guard logged `refused rootless npm install: npm install jsonwebtoken --no-save`.
+
+On the very next turn the agent wrote a root `package.json` with `write_file`, and the recovery loop then ran `npm install jsonwebtoken --save`, which the npm guard **permitted because a root manifest now existed**. The file is plainly hand-authored rather than npm-generated — `{"name": "fullstack-auth-project", "private": true, "dependencies": {"jsonwebtoken": "^9.0.3"}}`, where `npm init -y` names the directory and emits version/main/scripts.
+
+The harm was real and nothing reported it. The stray root manifest **shadowed the frontend's**, so `[SmokeTest] JS build check: npm run build (cwd=frontend)` became `[SmokeTest] No build script in package.json — skipping`: the build and style-coupling checks that ran in the previous run were silently disabled. Both acceptance instruments still passed, because neither looks at the repo root. The ghost's `unplanned-write (step -): package.json was written but no step declared it` was the only trace, one line among the run's ordinary output.
+
+This is the sixth recorded instance of an unsatisfiable gate being answered by deforming the project rather than the code, after `frontend/frontend/package.json`, `frontend/node.cmd`, `frontend/backend/.env.example`, `frontend/frontend/src/pages/*.jsx` and the `mklink /J node_modules` junction. The pattern worth naming is narrower than that, though: **a guard is only as strong as the weakest thing that can establish its precondition.** Refusing the command while leaving the state it checks writable buys nothing but an extra turn.
+
+`phantom_root_manifest_reason` closes it at the write, sharing the npm guard's shape so the two cannot disagree: it fires only when the root owns no manifest *and* some immediate subdirectory does. A greenfield root is left alone, an existing root package may be rewritten, sub-project manifests are untouched, and a root manifest **the plan declared** is always allowed — a workspaces root someone planned is a decision, not a workaround, which is why `_plan_declared_files` now rides on `FileMemory` beside `_plan_declared_roots`. The refusal names the real defect: *if a gate cannot resolve a package because it runs in the wrong directory, that is a defect in the GATE — run it where the manifest that owns the dependency lives.*
+
 ### Ghost Heal (orchestrator/ghost_heal.py)
 
 Deterministic repair of what the shadow finds — no LLM call. Runs per wave (so later steps benefit) and once at the end, under `[GhostHeal]`. Governed by one rule: **never invent content; freely restore content the plan already specified.** Those are different things — writing an empty `.site-header {}` to satisfy a check makes a real defect undetectable, but writing the `.site-header` rule *the planner put in `inline_code`* invents nothing and enforces a decision already made.

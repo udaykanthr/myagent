@@ -1230,6 +1230,37 @@ def _dir_imported_as_package(all_files, subproject: str) -> bool:
     return False
 
 
+def references_subproject(cmd, subproject):
+    r"""True when *cmd* already names *subproject*, so it locates itself.
+
+    A command that mentions the sub-project is written for the repo root:
+    running it FROM inside the sub-project makes every such path resolve
+    one level too deep. Two callers ask this question and they must not
+    answer it differently:
+
+      * `_declared_verify_cmd` decides whether to ADD a `cd {sub}` prefix;
+      * `declared_gate_cwd` decides whether to hand the gate `cwd={sub}`.
+
+    They diverged. `declared_gate_cwd` recognised only a leading `cd `,
+    so `npm --prefix frontend test -- --run && npm --prefix backend test`
+    was launched with cwd=frontend, where `--prefix frontend` means
+    `frontend/frontend`. Measured 2026-08-19: the gate died four times
+    (0xFFFFF026) and BulkTest logged "Plan-declared gate did not pass",
+    demoting a correct gate to the framework default — the exact
+    substitution that preflight exists to prevent. The identical command
+    passed from the repo root immediately before and after.
+
+    The leading character class admits path separators and `.` because
+    the shape that occurs is `require('./frontend/package.json')`, where
+    the character before the name is `/` rather than a quote.
+    """
+    if not cmd or not subproject:
+        return False
+    sub_re = re.escape(subproject.rstrip("/\\"))
+    return re.search(
+        rf"(?:^|[\s\"'=./\\]){sub_re}(?:[\\/.\s\"']|$)", cmd) is not None
+
+
 def _step_belongs_to_subproject(plan_step, subproject: str,
                                 memory: FileMemory) -> bool | None:
     """Whether *plan_step*'s files live under *subproject*, or None if unknown.
@@ -4263,16 +4294,7 @@ def _declared_verify_cmd(plan_step, memory: FileMemory,
         _sub_re = re.escape(sub.rstrip("/\\"))
         _imports_sub = re.search(rf"\b(?:import|from)\s+{_sub_re}\b",
                                  cmd) is not None
-        # The leading class must admit path separators and `.`. The shape
-        # that actually occurs is `require('./frontend/package.json')`,
-        # where the character before the name is `/`, not a quote — so a
-        # correct root-relative gate was read as making no reference to
-        # `frontend` and became `cd frontend && ...'./frontend/...'`,
-        # which nothing can satisfy. The recovery loop then satisfied it
-        # by creating `frontend/frontend/package.json`, which is exactly
-        # the duplicate nested package this guard exists to prevent.
-        _references_sub = re.search(
-            rf"(?:^|[\s\"'=./\\]){_sub_re}(?:[\\/.\s\"']|$)", cmd) is not None
+        _references_sub = references_subproject(cmd, sub)
         # A gate on a step the plan places under a SIBLING root is written
         # for the repo root, and `cd {sub}` silently redirects it to a
         # path that may well exist: `node -e "require('./backend/...')"`

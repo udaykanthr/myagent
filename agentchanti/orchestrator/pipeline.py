@@ -4416,11 +4416,25 @@ def declared_gate_cwd(cmd: str, subproject_cwd: str | None) -> str | None:
     substitution this preflight exists to prevent. Every other caller ran
     the same command from the repo root and it passed.
 
-    The test mirrors `_gate_on_declared_verify`, which already refuses to
-    ADD a `cd {sub}` prefix to a command that has one, so the two cannot
-    disagree about what "self-locating" means.
+    The test SHARES `references_subproject` with `_declared_verify_cmd`,
+    which decides the mirror-image question — whether to ADD a `cd {sub}`
+    prefix — so the two cannot disagree about what "self-locating" means.
+    They did disagree while this checked only for a leading `cd `:
+    `npm --prefix frontend test -- --run && npm --prefix backend test`
+    names the sub-project without cd-ing to it, so it was launched with
+    cwd=frontend, where `--prefix frontend` means `frontend/frontend`.
+    Measured 2026-08-19: the gate died four times (0xFFFFF026) and
+    BulkTest logged "Plan-declared gate did not pass", demoting a correct
+    gate to the framework default — the substitution this preflight
+    exists to prevent. The identical command passed from the repo root
+    immediately before and after.
     """
-    if cmd and cmd.lstrip().lower().startswith("cd "):
+    if not cmd:
+        return subproject_cwd
+    if cmd.lstrip().lower().startswith("cd "):
+        return None
+    from .step_handlers import references_subproject
+    if references_subproject(cmd, subproject_cwd):
         return None
     return subproject_cwd
 

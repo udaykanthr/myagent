@@ -235,6 +235,18 @@ A failing acceptance check now gets the same bounded recovery every other failur
 
 **The banner stays honest about it.** `Evidence.repaired` is modelled on `shallow`: it does **not** flip `independent`, because the check was never edited and really did run and really did pass, so the evidence is genuinely independent — what changes is the claim. `All tasks completed successfully!` and `All tasks completed — verified after 2 repair round(s).` are different results, and averaging them in a benchmark would hide exactly the variance worth measuring.
 
+### A Stylesheet Nothing Imports (orchestrator/style_coupling.py `reachable_stylesheets`)
+
+`find_style_drift` asked "is this class defined in some `.css` on disk?". The question that matters is "is it defined in a stylesheet the app actually **loads**?", and the gap between them let the smoke test's own repair loop drive itself green by writing into dead code.
+
+Measured 2026-08-20 run 30. Step 12.1 was to "update the React bootstrap to import the global responsive stylesheet"; the agent edited `App.jsx` instead of its declared target `main.jsx`, and the step's gate — `npm run build --silent` — passes whether or not any CSS is imported. `client/src/styles/global.css` ended up **7023 bytes that nothing imports**, while `main.jsx` kept Vite's stock `import './index.css'`; the built bundle contained no `home-hero`, proving it never reached the output. Routing survived (the providers live in `App.jsx`, a legitimate design) so the only casualty was the entire visual design.
+
+This check then found the classes BROKEN, handed the list to a repair loop, and the loop satisfied it by adding the missing rules **to `global.css`** — the unreachable file — and logged `Style coupling repaired` having changed nothing a user would see. Every gate, both acceptance instruments and the smoke test passed over an entirely unstyled application. Only the ghost's `violated-import-edge` noticed, and only because the *project-wide* search added days earlier could say "and no other planned file does either".
+
+Reachability is read from the three ways a project loads CSS: a JS/JSX `import`/`require`, an HTML `<link href>`, and `@import` chains out of anything already reachable. When **no** signal exists anywhere the function returns `None` and the old behaviour stands — some setups inject CSS by means this cannot see, and silently reporting every class as unstyled would be far worse than not judging.
+
+The finding also had to change, not just the verdict. Telling a reader to write rules that already exist is the wrong instruction: when the missing names sit in an unreachable stylesheet, the message becomes *"These classes ARE defined — in `src/styles/global.css` — but nothing imports it … Fix the IMPORT, not the rules."* Adding rules to a file nothing imports is precisely what the repair loop did.
+
 ### Ghost Shadow (orchestrator/ghost.py)
 
 Read-only reconciliation of the plan's *declared postconditions* against the real tree — no LLM calls, no commands run, no verdict changed. `GhostPlan.build()` is called in `cli.py` once the plan is final (after blind-edit routing / dependency fixes / verify repair) and before the first step runs, so its file hashes are a true pre-run baseline. Steps' `target:`/`exports:`/`imports:`/`verify:` become interned `Expectation` nodes (`EXISTS`, `TOUCHED`, `PARSES`, `EXPORTS`, `IMPORT_EDGE`, `PKG_PRESENT`, `GATE_PASSED`) shared across the steps that declare them; verdicts are four-valued (`HOLDS`/`VIOLATED`/`UNKNOWN`/`INAPPLICABLE`) and fold over an append-only observation journal. Resolved per wave next to `_reconcile_plan_graph`, reported once at the end of the run under `[Ghost]`.

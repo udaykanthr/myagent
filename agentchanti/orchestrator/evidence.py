@@ -69,6 +69,7 @@ INDEPENDENT_PRE_EXISTING = "pre-existing-tests"
 SELF_AUTHORED = "self-authored"
 PRE_EXISTING_FAILED = "pre-existing-tests-failed"
 ACCEPTANCE_FAILED = "acceptance-commands-failed"
+ACCEPTANCE_NOT_RUN = "acceptance-commands-not-run"
 NO_TESTS = "no-tests"
 
 
@@ -418,6 +419,27 @@ def classify(root: str,
                         f"{len(cmds)} user-supplied acceptance command(s) "
                         f"ran and FAILED: {shown} - the one instrument this "
                         f"run neither wrote nor can edit disagrees with it")
+
+    if acceptance_passed is None and cmds:
+        # Supplied, but never reached: the caller only runs them when the
+        # pipeline is otherwise green. `None` therefore means two very
+        # different things, and the self-authored branch below gives the
+        # wrong advice for one of them -- "Supply `acceptance_cmds` in
+        # .agentchanti.yaml" to a user who supplied them, about a run that
+        # never got as far as executing them. Measured 2026-08-22 run 31,
+        # which failed on a gate conflict and then printed exactly that.
+        #
+        # The evidence genuinely IS self-authored (nothing independent
+        # ran), so `independent` stays False; only the explanation and the
+        # advice change. Its own kind, so a benchmark can separate "no
+        # contract" from "contract never got to run".
+        shown = "; ".join(cmds[:2]) + (f" (+{len(cmds) - 2})"
+                                       if len(cmds) > 2 else "")
+        return Evidence(False, ACCEPTANCE_NOT_RUN,
+                        f"{len(cmds)} acceptance command(s) are configured "
+                        f"but did not run, because the pipeline failed "
+                        f"before reaching them: {shown} - fix the failure "
+                        f"above; nothing here says the contract is unmet")
 
     survivors = surviving_pre_existing_tests(root, snapshot)
     if survivors:

@@ -167,14 +167,23 @@ class TestDetectSubprojectRoot:
         assert result is None
 
     def test_detects_subproject_via_manifest_fallback(self):
-        """When memory has multiple top-level dirs, use the one with package.json."""
+        """When memory has multiple top-level dirs, use the one with package.json.
+
+        The bare root is the premise, not an accident: this fallback only
+        reasons soundly when the repo root is NOT itself a package. It was
+        implicit until the check for it landed, at which point the test
+        started reading the *agentchanti* repo's own pyproject.toml as the
+        project root's manifest. Stating it explicitly is what the test
+        always meant.
+        """
         memory = _make_memory({
             "dashboard-app/src/App.js": "A",
             "dashboard-app/package.json": "{}",
             "other-folder/data.txt": "some data",
         })
 
-        with patch("os.path.isdir", return_value=True):
+        with patch("os.path.isdir", return_value=True), \
+             patch("os.path.isfile", return_value=False):
             result = _detect_subproject_root(memory)
 
         assert result == "dashboard-app"
@@ -259,6 +268,13 @@ class TestDetectSubprojectRoot:
         def mock_isfile(path):
             if path == os.path.join("dashboard-app", "package.json"):
                 return True
+            # The repo root owns no manifest — the premise of this
+            # fallback, and previously implicit. Without it the check runs
+            # against the real cwd (the agentchanti repo, which has a
+            # pyproject.toml) and correctly declines to name a
+            # sub-project.
+            if os.sep not in str(path) and "/" not in str(path):
+                return False
             return orig_isfile(path)
 
         with patch("os.path.isdir", side_effect=mock_isdir), \

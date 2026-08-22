@@ -1557,9 +1557,42 @@ def _detect_subproject_root(memory: FileMemory) -> str | None:
                 log.info(f"[SubProject] Detected sub-project root: {subproject}/")
                 return subproject
 
+    # A root that owns its OWN manifest is not a sub-project scaffold.
+    #
+    # Everything below this line infers "the project really lives in
+    # subdirectory X" from finding a manifest in X. That inference is only
+    # sound when the repo root is NOT itself a package — which is the case
+    # this function was written for (`npx create-next-app my-app` leaves
+    # the root bare). When the root owns a manifest the app is AT the
+    # root, and a sibling package is just a second package, not "the"
+    # project root.
+    #
+    # Measured 2026-08-22 run 31. The plan scaffolded Vite at the root
+    # (`npm create vite@latest .`), so `package.json` with the real
+    # `"test": "vitest run"` sat at the top and the suite lived in
+    # `src/test/`. A planned `server/package.json` then made this function
+    # answer `server/`, and BulkTest ran the suite there: `npm test`
+    # failed, `npx vitest run` reported "No test files found", vitest and
+    # jsdom were installed into `server/`, and the recovery loop
+    # "fixed" the empty suite by writing `server/app.test.js` and
+    # rewriting `server/middleware/auth.js` from CommonJS into ESM. That
+    # rewrite broke gates 4.2 and 7.1, which `require()` it, and the run
+    # failed on a GATE CONFLICT. One wrong directory answer, and every
+    # step of the cascade behaved correctly given it.
+    #
+    # The explicit scaffold detections above are untouched: a `create-*`
+    # command naming a subdirectory is direct evidence and outranks this.
+    from ..executor import Executor
+    if any(os.path.isfile(m) for m in
+           ('package.json', 'requirements.txt', 'go.mod', 'Cargo.toml',
+            'Gemfile', 'pyproject.toml', 'composer.json')):
+        log.debug("[SubProject] The repo root owns a manifest, so the app "
+                  "is at the root — a sibling package is a second package, "
+                  "not a sub-project root")
+        return None
+
     # Fallback 1: if memory contains files from multiple top-level directories
     # (e.g. search provider added files), look for a known project manifest
-    from ..executor import Executor
     manifest_dirs = set()
     for p in nested_paths:
         if os.path.basename(p) in Executor._PROTECTED_FILENAMES:

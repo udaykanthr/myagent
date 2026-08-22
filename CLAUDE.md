@@ -130,6 +130,16 @@ Sanitisation truncates at the first destructive segment rather than blanking the
 
 Known hole: this governs gates only. An agent loop can still call `run_command` with anything, which is `AgentTools` sandboxing, not a gate check.
 
+### A Root That Owns a Manifest Is Not a Sub-Project (step_handlers.py `_detect_subproject_root`)
+
+The manifest fallbacks infer "the project really lives in subdirectory X" from finding a manifest in X. That inference is sound only when the repo root is **not** itself a package — the case the function was written for, where `npx create-next-app my-app` leaves the root bare. When the root owns a manifest the app is *at* the root, and a sibling package is a second package rather than "the" project root.
+
+Measured 2026-08-22 run 31. The plan scaffolded Vite at the root (`npm create vite@latest .`), so `package.json` carrying the real `"test": "vitest run"` sat at the top and the suite lived in `src/test/`. A planned `server/package.json` made this function answer `server/`, and every downstream step then behaved correctly given a wrong premise: BulkTest ran `npm test` at `cwd=server` (exit 1), fell back to `npx vitest run` there (`No test files found`), `VitestEnv` installed vitest/jsdom/RTL into `server/` and wrote `server/vitest.config.js` and `server/vitest.setup.js`, and the recovery loop "fixed" the empty suite by writing `server/app.test.js` and **rewriting `server/middleware/auth.js` from CommonJS into ESM**. That rewrite broke gates 4.2 and 7.1, which `require()` it, and the run ended on a GATE CONFLICT. One wrong directory answer cost the run — the same family as the five `_step_belongs_to_subproject` defects: *a per-directory fact answered at the wrong directory*.
+
+The guard sits above the manifest fallbacks only. Two stronger signals deliberately outrank it: an explicit `create-*` command naming a subdirectory (direct evidence, recorded as `_scaffolded_subproject`), and every tracked file sharing one first component — if all the work really is in there, it is the root whatever the top level contains. The pre-existing fallback tests turned out to depend on a bare root implicitly, and started reading *agentchanti's own* `pyproject.toml` once the check existed; their premise is now stated rather than assumed.
+
+**A configured acceptance command that never ran is not a missing one.** `classify` runs the commands only when the pipeline is otherwise green, so `acceptance_passed=None` means two different things — none supplied, or supplied and never reached. Run 31 failed on the gate conflict and then printed `Supply acceptance_cmds in .agentchanti.yaml` at a user who had supplied two of them. `acceptance-commands-not-run` says so instead; `independent` stays False, because nothing independent did in fact run, and the "supply them" advice survives only in the case where it is correct.
+
 ### Multi-Root Plans (step_handlers.py `_step_belongs_to_subproject`)
 
 A detected sub-project root is a claim about **one** tree, and the whole pipeline treats it as *the* tree: CMD steps are re-rooted into it, gates get a `cd {sub} &&` prefix, unprefixed write paths get prefixed. That is right for `npx create-next-app my-app` and wrong the moment a plan declares a second root beside it.

@@ -147,6 +147,7 @@ class GateLedger:
 
     def __init__(self) -> None:
         self._gates: dict[str, str] = {}  # cmd -> step label
+        self._last_output: dict[str, str] = {}  # cmd -> output of its last run
         self._lock = Lock()
 
     def record(self, cmd: str, step_label: str = "") -> None:
@@ -174,9 +175,15 @@ class GateLedger:
         with self._lock:
             return dict(self._gates)
 
+    def last_output(self, cmd: str) -> str | None:
+        """Output of *cmd*'s most recent run, or None if it never ran."""
+        with self._lock:
+            return self._last_output.get(cmd)
+
     def reset(self) -> None:
         with self._lock:
             self._gates.clear()
+            self._last_output.clear()
 
     def _sample_gate(self, executor, cmd: str,
                      timeout: int) -> tuple[str, str, int | None]:
@@ -190,6 +197,11 @@ class GateLedger:
         """
         ok, out = executor.run_command(cmd, timeout=timeout)
         exit_code = getattr(executor, "last_exit_code", None)
+        # Kept so a PASSING gate's output stays inspectable. A green
+        # verdict is not self-describing: `vitest --passWithNoTests` over
+        # zero test files exits 0, and only its output says so.
+        with self._lock:
+            self._last_output[cmd] = out or ""
         if ok:
             return "pass", out, exit_code
         if is_abnormal_exit(exit_code):

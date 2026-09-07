@@ -152,6 +152,286 @@ def parse_failed_install_targets(command: str) -> set[str]:
     return targets
 
 
+# Executables whose name, if written into the project, would be found
+# before the real tool. On Windows the current directory is searched
+# first and `.CMD`/`.BAT` are on PATHEXT, so a `node.cmd` beside the code
+# silently replaces the interpreter for everything run from there.
+_TOOLCHAIN_NAMES = frozenset({
+    "node", "npm", "npx", "yarn", "pnpm", "deno", "bun",
+    "python", "python3", "pip", "pip3", "py",
+    "git", "sh", "bash", "cmd", "powershell", "pwsh",
+})
+_EXECUTABLE_SUFFIXES = frozenset({
+    "", ".cmd", ".bat", ".exe", ".com", ".ps1", ".sh", ".pl",
+})
+
+
+def toolchain_shim(rel_path: str) -> Optional[str]:
+    """The tool *rel_path* would shadow when executed, if any.
+
+    Measured 2026-08-19. A gate asked bare Node to import a `.jsx`
+    module, which no Node can parse. After three loops and 30 turns the
+    agent stopped trying to satisfy the gate with code and replaced the
+    interpreter instead, writing `frontend/node.cmd`::
+
+        @echo off
+        "%ProgramFiles%\nodejs\node.exe" --experimental-loader ... %*
+
+    Every later `node` invocation from that directory would have run the
+    shim. Nothing in the project needs a file named after its toolchain,
+    and the one case that produced it was an agent escaping a gate it
+    could not otherwise pass - which is precisely when the guard should
+    hold. Judged on the basename alone: `tools/node.cmd` shadows just as
+    well as `node.cmd` for anything run from `tools/`.
+    """
+    name = re.split(r"[\\/]+", (rel_path or "").strip("\\/"))[-1]
+    if not name:
+        return None
+    stem, dot, ext = name.rpartition(".")
+    suffix = ("." + ext).lower() if dot else ""
+    base = (stem if dot else name).lower()
+    if base in _TOOLCHAIN_NAMES and suffix in _EXECUTABLE_SUFFIXES:
+        return base
+    return None
+
+
+_BARE_NPM_INSTALL_RE = re.compile(
+    r"^\s*npm\s+(?:i|install|add)\s+(?!-)(?P<rest>\S.*)$", re.IGNORECASE)
+
+
+def rootless_npm_install_reason(command: str, project_root: str) -> str | None:
+    """Why a bare `npm install <pkg>` here would create a phantom package.
+
+    `npm install <pkg>` in a directory with no `package.json` does not
+    fail — it CREATES one, plus a `node_modules` and a lockfile. In a
+    repo whose real packages live in sub-directories, that manufactures a
+    top-level package belonging to no project, and the app only keeps
+    working because Node resolution walks upward. Shipping the
+    sub-project alone then breaks.
+
+    Measured across three runs of one benchmark. Two came from healers
+    and were fixed at their source; the third was the agent itself
+    running::
+
+        npm install jsonwebtoken && npm install jsonwebtoken --save --prefix backend
+
+    — the second half correct, the first half leaving a root
+    `package.json` containing a single stray dependency. This is the
+    `run_command` gap the architecture notes already name: tool
+    sandboxing, not a gate check.
+
+    Narrow by construction. It fires only when the working directory has
+    **no** manifest of its own *and* some immediate subdirectory does,
+    which is precisely the multi-root shape — a genuine greenfield root
+    install has no sibling manifests yet and is left alone, as is any
+    install in a directory that legitimately owns a `package.json`.
+    """
+    # Every segment, not just the first. A chain holds several
+    # independent invocations, which is why `parse_failed_install_targets`
+    # already splits on the same separators. Measured 2026-08-19 run 25:
+    #     npm install --prefix backend jsonwebtoken --save-prod
+    #       && npm install jsonwebtoken
+    # The anchored match saw only the correctly-directed first half, found
+    # `--prefix`, and allowed the whole line — so the bare root install
+    # after the `&&` was never examined and created the phantom package
+    # this guard exists to prevent.
+    args: list[str] = []
+    for segment in _CMD_SEPARATOR_RE.split(command or ""):
+        segment = segment.strip()
+        # Segments share sequential state, so scanning them independently
+        # loses the very context that makes an install correct. A `cd`
+        # moves everything after it out of this directory, and `npm init`
+        # gives the destination a manifest — after either, the question
+        # this guard asks no longer applies and it cannot answer it
+        # statically. Measured 2026-08-19 run 26, where the segment-wise
+        # check added for the previous defect refused
+        #     mkdir backend && cd backend && npm init -y
+        #       && npm install express cors dotenv jsonwebtoken bcryptjs
+        # which is the ordinary way to stand a sub-project up.
+        if re.match(r"^cd\s+\S", segment, re.IGNORECASE) or                 re.match(r"^npm\s+init", segment, re.IGNORECASE):
+            return None
+        m = _BARE_NPM_INSTALL_RE.match(segment)
+        if not m:
+            continue
+        rest = m.group("rest")
+        if "--prefix" in rest or "-C " in rest:
+            continue                     # this one is directed somewhere
+        seg_args = [a for a in rest.split() if not a.startswith("-")]
+        if seg_args:
+            args = seg_args
+            break
+    if not args:
+        return None                      # nothing undirected to install
+    if os.path.isfile(os.path.join(project_root, "package.json")):
+        return None                      # the root really is a package
+
+    subs = []
+    try:
+        for entry in sorted(os.scandir(project_root), key=lambda e: e.name):
+            if not entry.is_dir() or entry.name.startswith("."):
+                continue
+            if entry.name == "node_modules":
+                continue
+            if os.path.isfile(os.path.join(entry.path, "package.json")):
+                subs.append(entry.name)
+    except OSError:
+        return None
+    if not subs:
+        return None                      # nothing better to suggest
+
+    pkgs = " ".join(args)
+    return (
+        f"ERROR: refusing to run '{command.strip()}'. There is no "
+        f"package.json here, so npm would CREATE one along with a "
+        f"node_modules and a lockfile - a top-level package belonging to "
+        f"no project. The real package(s) are: {', '.join(subs)}.\n"
+        f"Install into the one that needs it, e.g. "
+        f"`npm --prefix {subs[0]} install {pkgs}`.")
+
+
+def phantom_root_manifest_reason(rel_path: str, project_root: str,
+                                 declared: "set[str] | None" = None) -> "str | None":
+    r"""Why writing this root ``package.json`` would manufacture a phantom package.
+
+    `rootless_npm_install_reason` refuses `npm install <pkg>` at a root
+    that owns no manifest, because npm would CREATE one and leave a
+    top-level package belonging to no project. That guard has an escape
+    hatch -- if the root really is a package, the install is fine -- and
+    the escape hatch was **agent-writable**.
+
+    Measured 2026-08-19 run 28. Step 5.1's gate did `require('jsonwebtoken')`
+    from the repo root, where it cannot resolve: the package lives in
+    `backend/node_modules`. The env self-heal correctly installed into
+    `backend/`, which did not help a root-level require, and the gate
+    then failed six times over two artifacts. Everything upstream got it
+    right -- `gate STALLED ... the gate is not measuring the artifact`,
+    then `NOT escalating - the gate is the defect, not the code`, and
+    `refused rootless npm install: npm install jsonwebtoken --no-save`.
+
+    On the very next turn the agent wrote a root `package.json` with
+    `write_file`, and the recovery loop then ran
+    `npm install jsonwebtoken --save`, which the npm guard permitted
+    because a root manifest now existed. The file it wrote --
+    `{"name": "fullstack-auth-project", "private": true, "dependencies":
+    {"jsonwebtoken": "^9.0.3"}}` -- is plainly hand-authored: `npm init
+    -y` names the directory and emits version/main/scripts.
+
+    The harm was not hypothetical and nothing reported it. The stray root
+    manifest SHADOWED the frontend's, so `[SmokeTest] JS build check: npm
+    run build (cwd=frontend)` became `[SmokeTest] No build script in
+    package.json - skipping`, silently disabling the build and
+    style-coupling checks that had run in the previous run. Both
+    acceptance instruments still passed, because neither looks at the
+    repo root.
+
+    This is the sixth recorded instance of an unsatisfiable gate being
+    answered by deforming the project rather than the code, after
+    frontend/frontend/package.json, frontend/node.cmd,
+    frontend/backend/.env.example, frontend/frontend/src/pages/*.jsx and
+    the `mklink /J node_modules` junction.
+
+    Narrow by construction, and by the same shape as the npm guard: it
+    fires only when the root owns no manifest *and* some immediate
+    subdirectory does -- the multi-root layout. A greenfield root install
+    has no sibling manifests and is left alone; so is a root that already
+    owns a manifest. And a target the PLAN declared is always allowed,
+    because a workspaces root someone planned is a real decision, not an
+    agent working around a measurement.
+    """
+    import os
+
+    norm = (rel_path or "").replace("\\", "/").lstrip("/")
+    while norm.startswith("./"):
+        norm = norm[2:]
+    if norm.lower() != "package.json":
+        return None                      # only the ROOT manifest
+    if norm in (declared or set()):
+        return None                      # the plan asked for it
+    if os.path.isfile(os.path.join(project_root, "package.json")):
+        return None                      # editing an existing root package
+
+    subs = []
+    try:
+        for entry in sorted(os.scandir(project_root), key=lambda e: e.name):
+            if not entry.is_dir() or entry.name.startswith("."):
+                continue
+            if entry.name == "node_modules":
+                continue
+            if os.path.isfile(os.path.join(entry.path, "package.json")):
+                subs.append(entry.name)
+    except OSError:
+        return None
+    if not subs:
+        return None                      # nothing better to suggest
+
+    return (
+        "ERROR: refusing to create a top-level package.json. The real "
+        "package(s) are: " + ", ".join(subs) + ", and no plan step "
+        "declares a root manifest. A package.json here belongs to no "
+        "project: it shadows the sub-projects' own manifests (a root one "
+        "with no build script silently disables the frontend build "
+        "check), and it makes a root `npm install` look legitimate when "
+        "it is not.\n"
+        "If a gate cannot resolve a package because it runs in the wrong "
+        "directory, that is a defect in the GATE - run it where the "
+        "manifest that owns the dependency lives, e.g. "
+        "`npm --prefix " + subs[0] + " ...`, or say so in your summary. "
+        "Do not give the root a manifest to make the gate pass.")
+
+
+_DEP_DIR_NAMES = frozenset({"node_modules", "site-packages", "vendor",
+                            "bower_components"})
+
+# `mklink /J link target`, `mklink /D link target`, `ln -s target link`,
+# and PowerShell's `New-Item -ItemType SymbolicLink|Junction -Path link`.
+_LINK_CMD_RES = (
+    re.compile(r"\bmklink\s+(?:/[A-Za-z]+\s+)*(?P<link>\S+)", re.IGNORECASE),
+    re.compile(r"\bln\s+-s\w*\s+\S+\s+(?P<link>\S+)"),
+    re.compile(r"New-Item\b.*?-ItemType\s+(?:SymbolicLink|Junction)"
+               r".*?-(?:Path|Name)\s+(?P<link>\S+)",
+               re.IGNORECASE | re.DOTALL),
+)
+
+
+def fabricated_dependency_link(command: str) -> Optional[str]:
+    """The dependency directory *command* would fake by linking, if any.
+
+    A dependency tree is created by a package manager, in the directory
+    that owns the manifest. Aliasing one into another location makes
+    resolution depend on a filesystem link that survives no clone, copy,
+    archive or deploy — the project appears to work here and nowhere
+    else.
+
+    Measured 2026-08-19 run 23. A gate ran from the repo root and did a
+    bare `require('jsonwebtoken')`, which cannot resolve there in a
+    multi-root layout: the package lives in `backend/node_modules`.
+    Rather than report the gate as wrongly scoped, the agent ran::
+
+        mklink /J node_modules backend\\node_modules
+
+    and the gate went green. Removing the junction afterwards left the
+    application working exactly as before, so it carried no weight — it
+    existed only to satisfy the measurement. That is the fifth recorded
+    instance of an unsatisfiable gate being answered by deforming the
+    project instead of the code, after frontend/frontend/package.json,
+    frontend/node.cmd, frontend/backend/.env.example and
+    frontend/frontend/src/pages/*.jsx.
+
+    Judged on the link NAME only. Linking ordinary project directories is
+    left alone; it is aliasing the dependency tree that turns a
+    resolution failure into a hidden one.
+    """
+    for pattern in _LINK_CMD_RES:
+        m = pattern.search(command or "")
+        if not m:
+            continue
+        link = m.group("link").strip().strip("\"'")
+        name = re.split(r"[\\/]+", link.rstrip("\\/"))[-1].lower()
+        if name in _DEP_DIR_NAMES:
+            return name
+    return None
+
+
 def shadowed_dist(rel_path: str, failed: set[str]) -> Optional[str]:
     """The failed distribution *rel_path* would shadow, if any.
 
@@ -217,6 +497,19 @@ class AgentTools:
         # step — build_step_tools() makes one instance per step — so the
         # cross-step answer comes from FileMemory, which is run-scoped.
         self._created_manifests: set[str] = set()
+        # Files the run's acceptance commands invoke. See _acceptance_refusal.
+        self._acceptance_files: set[str] = set()
+
+    def protect_acceptance_files(self, paths) -> None:
+        """Mark *paths* as the run's independent acceptance instruments.
+
+        Normalised to project-root-relative POSIX form so a later write
+        matches however the model spells the path.
+        """
+        for p in paths or ():
+            if p:
+                self._acceptance_files.add(
+                    str(p).replace("\\", "/").lstrip("./").strip("/"))
 
     # ── Definitions ──
 
@@ -397,6 +690,40 @@ class AgentTools:
             raise ValueError(f"path '{path}' is outside the project root")
         return full
 
+    def _acceptance_refusal(self, path: str, rel: str) -> str | None:
+        """Refuse a write to a file the acceptance commands invoke, else None.
+
+        `acceptance_cmds` is described throughout this project as the one
+        instrument the model neither wrote nor can edit, and so the only
+        check allowed to fail a run on its own. The first half was always
+        true; the second half was not enforced for a command that invokes
+        a FILE — only the command string in config was out of reach, and
+        the script it runs sat in the project root like any other source.
+
+        Observed 2026-08-19: a planner declared `target: acceptance_check.cjs`
+        on a TEST step. It behaved — the step's description said "run the
+        supplied unchanged acceptance checker" and the bytes were identical
+        afterwards — but nothing had made that the only possible outcome,
+        and a run that rewrites its own acceptance check reports independent
+        evidence for a contract it authored. That is the oldest cheat in
+        this codebase's history, already documented for seeded tests.
+
+        Reading is untouched: the model may inspect what it must satisfy.
+        """
+        if rel.replace("\\", "/") not in self._acceptance_files:
+            return None
+        log.warning("[AgentTools] refused write to acceptance instrument "
+                    "'%s'", rel)
+        return (
+            f"ERROR: refusing to modify '{path}'. It is an acceptance "
+            f"check supplied by the operator via `acceptance_cmds`, and it "
+            f"is the only verification in this run that you did not write. "
+            f"Editing it would make the run's independent evidence "
+            f"self-authored, which is worth less than no evidence at all.\n"
+            f"Read it as often as you like and change the PROJECT until it "
+            f"passes. If you believe the check itself is wrong, say so in "
+            f"your summary — do not edit it.")
+
     def _record(self, rel_path: str, content: str) -> None:
         """Record a write that has ALREADY landed on disk.
 
@@ -461,6 +788,28 @@ class AgentTools:
     def _tool_write_file(self, path: str, content: str) -> str:
         full = self._resolve(path)
         rel = os.path.relpath(full, self.project_root)
+        refusal = self._acceptance_refusal(path, rel)
+        if refusal is not None:
+            return refusal
+        phantom = phantom_root_manifest_reason(
+            rel, self.project_root,
+            getattr(self._memory, "_plan_declared_files", None))
+        if phantom is not None:
+            log.warning("[AgentTools] refused phantom root manifest '%s'", rel)
+            return phantom
+        shim = toolchain_shim(rel)
+        if shim is not None:
+            log.warning("[AgentTools] refused toolchain shim '%s' (would "
+                        "shadow '%s')", rel, shim)
+            return (
+                f"ERROR: refusing to write '{path}'. A file named after "
+                f"'{shim}' is found before the real tool when anything runs "
+                f"from that directory, so this would silently replace the "
+                f"{shim} the rest of the run - and the user - depends on.\n"
+                f"If a gate cannot be satisfied because a tool lacks a "
+                f"capability (Node cannot parse JSX, for instance), that is "
+                f"a defect in the GATE. Say so in your summary; do not "
+                f"replace the tool.")
         dist = shadowed_dist(rel, self._failed_installs)
         if dist is not None:
             log.warning(f"[AgentTools] refused shadow write '{rel}' "
@@ -532,6 +881,24 @@ class AgentTools:
 
     def _tool_edit_file(self, path: str, old_text: str, new_text: str) -> str:
         full = self._resolve(path)
+        rel = os.path.relpath(full, self.project_root)
+        refusal = self._acceptance_refusal(path, rel)
+        if refusal is not None:
+            return refusal
+        # Creation is already blocked in _tool_write_file, so this covers
+        # the other direction: a shim the project legitimately ships (or
+        # one an earlier run left behind) is not the agent's to rewrite.
+        shim = toolchain_shim(rel)
+        if shim is not None:
+            log.warning("[AgentTools] refused edit of toolchain shim '%s' "
+                        "(would shadow '%s')", rel, shim)
+            return (
+                f"ERROR: refusing to edit '{path}'. It shadows the real "
+                f"'{shim}' for anything run from that directory, so changing "
+                f"it changes the tool the rest of the run depends on. If a "
+                f"gate cannot be satisfied because a tool lacks a "
+                f"capability, that is a defect in the GATE — say so in your "
+                f"summary rather than altering the tool.")
         if not os.path.isfile(full):
             return f"ERROR: file not found: {path}"
         with open(full, "r", encoding="utf-8", errors="replace") as f:
@@ -576,6 +943,26 @@ class AgentTools:
         return f"OK: replaced 1 occurrence in {path}"
 
     def _tool_run_command(self, command: str) -> str:
+        faked = fabricated_dependency_link(command)
+        if faked is not None:
+            log.warning("[AgentTools] refused fabricated %s link: %s",
+                        faked, command.strip()[:120])
+            return (
+                f"ERROR: refusing to run '{command.strip()}'. Linking a "
+                f"'{faked}' directory into another location fakes module "
+                f"resolution: it survives no clone, copy, archive or "
+                f"deploy, so the project would appear to work here and "
+                f"nowhere else.\n"
+                f"If a gate cannot resolve a package, the gate is running "
+                f"in the wrong directory — run it where the manifest lives "
+                f"(`npm --prefix <dir> ...`, or require the package by its "
+                f"real path). Say so in your summary rather than aliasing "
+                f"the dependency tree.")
+        rootless = rootless_npm_install_reason(command, self.project_root)
+        if rootless is not None:
+            log.warning("[AgentTools] refused rootless npm install: %s",
+                        command.strip()[:120])
+            return rootless
         stripped_pipe = ""
         if os.name == "nt":
             _clean = _POSIX_OUTPUT_PIPE_RE.sub("", command).strip()

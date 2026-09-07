@@ -4290,8 +4290,43 @@ def _ensure_pytest_available(executor, cwd: str | None = None) -> None:
 # Vitest/Node resolution errors for uninstalled npm packages, e.g.
 #   Cannot find package '@testing-library/react' imported from ...
 #   Cannot find module 'axios'
+# Capture the WHOLE quoted specifier, then decide whether it names a
+# package. Matching a package-shaped prefix instead silently truncated
+# anything else into something installable: Node says `Cannot find
+# module '<absolute path>'` when a FILE is missing, and `[\w.-]+` stops
+# at the colon, so `C:\Users\...\run-tests.js` yielded the package
+# name "C" and the loop ran `npm install -D C`. Measured 2026-08-19
+# run 14. That is the supply-chain hazard `_missing_third_party_module`
+# already refuses on the Python side — a name that happens to exist on
+# the registry would be installed into the project — and single-letter
+# npm packages do exist.
 _JS_MISSING_PKG_RE = re.compile(
-    r"Cannot find (?:package|module) '((?:@[\w.-]+/)?[\w.-]+)")
+    r"Cannot find (?:package|module) '([^']+)'")
+
+# npm's own naming rules, tightened to what can appear in an import.
+_NPM_NAME_RE = re.compile(r"^(?:@[a-z0-9][\w.-]*/)?[a-z0-9][\w.-]*$",
+                          re.IGNORECASE)
+
+
+def _npm_package_of(spec: str) -> str | None:
+    r"""The package *spec* refers to, or None when it is not a package.
+
+    A path is not a package: absolute (`/x`, `C:\x`), relative (`./x`,
+    `../x`), or carrying a separator that scoping cannot explain. A deep
+    import (`lodash/debounce`) resolves to its package (`lodash`), which
+    is what installing it would need.
+    """
+    spec = (spec or "").strip()
+    if not spec or spec[0] in "./~" or "\\" in spec:
+        return None
+    if re.match(r"^[A-Za-z]:", spec):      # Windows drive letter
+        return None
+    if spec.startswith("@"):
+        parts = spec.split("/")
+        pkg = "/".join(parts[:2]) if len(parts) >= 2 else spec
+    else:
+        pkg = spec.split("/")[0]
+    return pkg if _NPM_NAME_RE.match(pkg) else None
 
 
 def _missing_js_packages(output: str) -> list[str]:
@@ -4303,8 +4338,8 @@ def _missing_js_packages(output: str) -> list[str]:
     """
     seen: list[str] = []
     for m in _JS_MISSING_PKG_RE.finditer(output):
-        pkg = m.group(1)
-        if pkg not in seen and not pkg.startswith("."):
+        pkg = _npm_package_of(m.group(1))
+        if pkg and pkg not in seen:
             seen.append(pkg)
     return seen
 
@@ -4381,11 +4416,25 @@ def declared_gate_cwd(cmd: str, subproject_cwd: str | None) -> str | None:
     substitution this preflight exists to prevent. Every other caller ran
     the same command from the repo root and it passed.
 
-    The test mirrors `_gate_on_declared_verify`, which already refuses to
-    ADD a `cd {sub}` prefix to a command that has one, so the two cannot
-    disagree about what "self-locating" means.
+    The test SHARES `references_subproject` with `_declared_verify_cmd`,
+    which decides the mirror-image question — whether to ADD a `cd {sub}`
+    prefix — so the two cannot disagree about what "self-locating" means.
+    They did disagree while this checked only for a leading `cd `:
+    `npm --prefix frontend test -- --run && npm --prefix backend test`
+    names the sub-project without cd-ing to it, so it was launched with
+    cwd=frontend, where `--prefix frontend` means `frontend/frontend`.
+    Measured 2026-08-19: the gate died four times (0xFFFFF026) and
+    BulkTest logged "Plan-declared gate did not pass", demoting a correct
+    gate to the framework default — the substitution this preflight
+    exists to prevent. The identical command passed from the repo root
+    immediately before and after.
     """
-    if cmd and cmd.lstrip().lower().startswith("cd "):
+    if not cmd:
+        return subproject_cwd
+    if cmd.lstrip().lower().startswith("cd "):
+        return None
+    from .step_handlers import references_subproject
+    if references_subproject(cmd, subproject_cwd):
         return None
     return subproject_cwd
 

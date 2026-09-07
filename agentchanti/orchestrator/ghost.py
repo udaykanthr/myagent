@@ -687,8 +687,13 @@ class GhostPlan:
             return verdict, evidence
 
         if exp.kind == KIND_IMPORT_EDGE:
+            # `elsewhere` is every OTHER planned file, so an edge the code
+            # wired from a different step is not reported as unwired. See
+            # `_check_edge` for why that is the right reading.
+            others = [c for c in sorted(self.files) if c not in exp.consumers]
             return _check_edge(exp.subject, exp.detail,
-                               [(c, content(c)) for c in exp.consumers])
+                               [(c, content(c)) for c in exp.consumers],
+                               elsewhere=[(c, content(c)) for c in others])
 
         if exp.kind == KIND_PKG_PRESENT:
             return _check_packages(self.root, exp.subject,
@@ -1251,7 +1256,9 @@ def _is_unbound_use(text: str, symbol: str) -> bool:
 
 
 def _check_edge(src: str, symbols: str,
-                consumers: list[tuple[str, Optional[str]]]) -> tuple[str, str]:
+                consumers: list[tuple[str, Optional[str]]],
+                elsewhere: list[tuple[str, Optional[str]]] | None = None,
+                ) -> tuple[str, str]:
     """Does ANY file the step produces reference the module it imports?
 
     Deliberately weak twice over. It looks for the producer's module stem
@@ -1292,10 +1299,43 @@ def _check_edge(src: str, symbols: str,
                 return HOLDS, f"wired in {path}"
     if len(readable) < len(consumers):
         return UNKNOWN, "some of the step's files could not be read"
+
+    # The declared consumer does not reference it — but the plan names
+    # the step that SHOULD consume a module, and the code is free to
+    # satisfy that contract from a different file. `export-drift`
+    # already reasons this way ("a contract with no consumer cannot
+    # break anything"); the mirror is that a contract WITH a consumer
+    # is kept, wherever the consumer turned out to live.
+    #
+    # Measured 2026-08-19. The plan declared the five page components
+    # importing `AppLayout`. The code instead used React Router's
+    # layout-route form — `<Route element={<AppLayout />}>` in App.jsx
+    # with an `<Outlet />` inside the layout — which is the idiomatic
+    # pattern and strictly better than each page wrapping itself. Every
+    # page rendered inside the layout, the build passed, and the ghost
+    # reported `the import edge was never wired` over working, wired,
+    # well-factored code. A finding that fires on the better of two
+    # correct designs trains the reader to skip the whole category.
+    src_key = module_key(src)
+    for path, text in (elsewhere or []):
+        # The source module is never evidence about its own consumers: it
+        # declares the very symbols being searched for, and its filename
+        # is the stem. Counting it turned a genuinely unwired edge into a
+        # pass -- caught by test_unwired_import_edge_is_violated, whose
+        # `board.py` vouched for a `main.py` that ignored it.
+        if text is None or module_key(path) == src_key:
+            continue
+        for needle in needles:
+            if needle and re.search(rf"\b{re.escape(needle)}\b", text):
+                return HOLDS, (
+                    f"wired in {path} rather than the step's own file(s) — "
+                    f"the plan named a different consumer, but the contract "
+                    f"holds")
+
     return VIOLATED, (
         f"none of the step's file(s) ({', '.join(p for p, _ in readable)}) "
-        f"mentions `{stem}` or any declared symbol — the import edge was "
-        f"never wired")
+        f"mentions `{stem}` or any declared symbol, and no other planned "
+        f"file does either — the import edge was never wired")
 
 
 # ── Declared dependencies vs. the environment that will run the app ──
@@ -1406,7 +1446,17 @@ def _check_packages(root: str, manifest: str,
             return UNKNOWN, "manifest is not readable JSON"
         if not deps:
             return INAPPLICABLE, "no runtime dependencies declared"
-        node_modules = os.path.join(root, "node_modules")
+        # Node resolves from the manifest's OWN directory, so that is the
+        # environment this manifest describes. Looking in the repo root
+        # instead is wrong for every multi-root layout: measured
+        # 2026-08-19, `backend/node_modules` held all 101 packages and
+        # `frontend/node_modules` all 93, yet both manifests were judged
+        # against the root and reported VIOLATED — after which the healer
+        # installed both dependency sets at the top level, creating a
+        # `package.json`, a lockfile and a 107-package `node_modules` that
+        # belong to no project in the repo.
+        pkg_dir = os.path.join(root, os.path.dirname(manifest))
+        node_modules = os.path.join(pkg_dir, "node_modules")
         if not os.path.isdir(node_modules):
             return UNKNOWN, "no node_modules — cannot tell what is installed"
         missing = [d for d in deps

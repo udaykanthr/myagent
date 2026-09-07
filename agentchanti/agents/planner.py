@@ -631,6 +631,23 @@ class PlannerAgent(Agent):
                             language=language,
                             api_client=kb_context_builder._api_client,
                         )
+                        # Scope to the project's FRAMEWORK too, not just
+                        # its language. `language=` cannot separate these:
+                        # the Django docs are correctly tagged
+                        # `language: "python"` and a Pygame game is a Python
+                        # project, so every run of the Pac-Man benchmark
+                        # surfaced "Django Page Creation Pattern" here. The
+                        # per-step builder drops it a layer later, but this
+                        # list is what the IntentAgent picks `KB docs:` from
+                        # and what the force-include net scans — which is
+                        # how "Vitest React Testing Library Setup" reached a
+                        # Pygame plan. Same rule, same tokeniser, one
+                        # implementation.
+                        from ..kb import context_builder as _kb_cb
+                        _title_hits = _kb_cb.scope_docs_to_project(
+                            _title_hits,
+                            _kb_cb.task_vocabulary(_raw_task),
+                            where="pre-analysis")
                         _available_kb_titles = [
                             r.title for r in (_title_hits or []) if r.title
                         ]

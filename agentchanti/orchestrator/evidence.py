@@ -49,6 +49,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import re
 from dataclasses import dataclass
 from typing import Iterable, Optional
 
@@ -67,6 +68,8 @@ INDEPENDENT_ACCEPTANCE = "acceptance-commands"
 INDEPENDENT_PRE_EXISTING = "pre-existing-tests"
 SELF_AUTHORED = "self-authored"
 PRE_EXISTING_FAILED = "pre-existing-tests-failed"
+ACCEPTANCE_FAILED = "acceptance-commands-failed"
+ACCEPTANCE_NOT_RUN = "acceptance-commands-not-run"
 NO_TESTS = "no-tests"
 
 
@@ -94,6 +97,14 @@ class Evidence:
     kind: str
     detail: str
     shallow: bool = False
+    # Repair rounds spent getting the acceptance commands green. Modelled
+    # on `shallow`: it does NOT flip `independent`, because the check was
+    # never edited (agent_tools refuses that) and it really did run and
+    # really did pass -- so the evidence is genuinely independent. What
+    # changes is the CLAIM. A run that passed on the third attempt is not
+    # the same result as one that passed clean, and averaging them in a
+    # benchmark hides exactly the variance worth measuring.
+    repaired: int = 0
 
     @property
     def headline(self) -> str:
@@ -102,12 +113,17 @@ class Evidence:
         if self.shallow:
             return ("Tasks completed — verified only that it runs, not that "
                     "it works.")
+        if self.repaired:
+            return (f"All tasks completed — verified after {self.repaired} "
+                    f"repair round(s).")
         return "All tasks completed successfully!"
 
     def log_line(self) -> str:
         verdict = "independent" if self.independent else "self-authored"
         if self.shallow:
             verdict += " but SHALLOW"
+        if self.repaired:
+            verdict += f" after {self.repaired} repair round(s)"
         return f"Evidence: {verdict} ({self.kind}) — {self.detail}"
 
 
@@ -121,6 +137,42 @@ def _digest(path: str) -> Optional[str]:
             return hashlib.sha256(fh.read()).hexdigest()
     except OSError:
         return None
+
+
+def acceptance_instrument_files(cmds, root: str = ".") -> set[str]:
+    """Existing files the acceptance commands invoke, relative to *root*.
+
+    `acceptance_cmds` is the only check in a run that the model did not
+    write. That holds absolutely for the command STRING, which lives in
+    config the model cannot reach — and did not hold at all for a command
+    that invokes a file, which sits in the project root like any other
+    source. This names those files so the agent's tools can refuse to
+    write them.
+
+    Deliberately conservative: a token counts only when it resolves to a
+    file that already exists, so `npm --prefix frontend run build`
+    contributes nothing while `node acceptance_check.cjs` contributes the
+    script. Protecting a path that does not exist would block the run from
+    creating an ordinary file that merely shares a name with a token.
+    """
+    found: set[str] = set()
+    for cmd in cmds or ():
+        for tok in re.split(r"[\s;|&<>()]+", str(cmd or "")):
+            tok = tok.strip("\"'")
+            if not tok or tok.startswith("-"):
+                continue
+            norm = tok.replace("\\", "/")
+            while norm.startswith("./"):
+                norm = norm[2:]
+            norm = norm.lstrip("/")
+            if not norm or norm in (".", ".."):
+                continue
+            try:
+                if os.path.isfile(os.path.join(root, norm)):
+                    found.add(norm)
+            except (OSError, ValueError):
+                continue
+    return found
 
 
 def snapshot_test_files(root: str) -> dict[str, str]:
@@ -344,6 +396,51 @@ def classify(root: str,
                         f"{len(cmds)} user-supplied acceptance command(s) "
                         f"passed: {shown}")
 
+    if acceptance_passed is False:
+        # Louder than "unverified", and the mirror of PRE_EXISTING_FAILED
+        # below: the one instrument the model neither wrote nor can edit
+        # ran and DISAGREED. That says strictly more than absence of
+        # evidence, and it is the strongest negative signal this module
+        # can report.
+        #
+        # `False` used to fall through to the self-authored branch, whose
+        # advice is "Supply `acceptance_cmds` in .agentchanti.yaml" --
+        # addressed to a user who had already supplied them, about a run
+        # those very commands had just failed. Measured 2026-08-19 run
+        # 29: the acceptance check correctly failed an artifact whose
+        # login issued a `randomUUID()` token that no route ever
+        # verified, and the closing line read `Evidence: self-authored
+        # ... the run marked its own homework. Supply acceptance_cmds`.
+        # The verdict was right and the explanation of it was wrong in
+        # both halves.
+        shown = "; ".join(cmds[:2]) + (f" (+{len(cmds) - 2})"
+                                       if len(cmds) > 2 else "")
+        return Evidence(False, ACCEPTANCE_FAILED,
+                        f"{len(cmds)} user-supplied acceptance command(s) "
+                        f"ran and FAILED: {shown} - the one instrument this "
+                        f"run neither wrote nor can edit disagrees with it")
+
+    if acceptance_passed is None and cmds:
+        # Supplied, but never reached: the caller only runs them when the
+        # pipeline is otherwise green. `None` therefore means two very
+        # different things, and the self-authored branch below gives the
+        # wrong advice for one of them -- "Supply `acceptance_cmds` in
+        # .agentchanti.yaml" to a user who supplied them, about a run that
+        # never got as far as executing them. Measured 2026-08-22 run 31,
+        # which failed on a gate conflict and then printed exactly that.
+        #
+        # The evidence genuinely IS self-authored (nothing independent
+        # ran), so `independent` stays False; only the explanation and the
+        # advice change. Its own kind, so a benchmark can separate "no
+        # contract" from "contract never got to run".
+        shown = "; ".join(cmds[:2]) + (f" (+{len(cmds) - 2})"
+                                       if len(cmds) > 2 else "")
+        return Evidence(False, ACCEPTANCE_NOT_RUN,
+                        f"{len(cmds)} acceptance command(s) are configured "
+                        f"but did not run, because the pipeline failed "
+                        f"before reaching them: {shown} - fix the failure "
+                        f"above; nothing here says the contract is unmet")
+
     survivors = surviving_pre_existing_tests(root, snapshot)
     if survivors:
         shown = ", ".join(survivors[:3])
@@ -417,3 +514,98 @@ def run_acceptance_commands(executor, cmds: Iterable[str]
         return False, failures
     log.info(f"[Acceptance] all {len(cmds)} command(s) passed")
     return True, []
+
+
+def repair_failed_acceptance(*, executor, cmds, failures, llm_client, memory,
+                             task, language=None, max_rounds=3,
+                             max_turns=8, escalation_client=None,
+                             kb_context_builder=None, project_root=".",
+                             run_acceptance=None):
+    """Retry a failed acceptance check, repairing the PROJECT between rounds.
+
+    Returns ``(passed, rounds_spent, failures)``.
+
+    `acceptance_cmds` used to run once, at the very end, with nothing
+    after it -- so a plan that simply never built what the contract
+    requires failed the run outright, after every one of its own gates
+    had passed. Measured 2026-08-19 run 29: 765k tokens and 13 minutes to
+    discover on the final line that the backend had no protected
+    endpoint, a fact fixed at 23:42 when the plan chose `randomUUID()`
+    sessions and never installed a JWT library. Nothing between planning
+    and exit could see it, because the pipeline verifies what the PLAN
+    declares and this plan declared no such route.
+
+    The model may READ the check -- that is the point, and
+    `_acceptance_refusal` allows it -- but cannot write it. That refusal
+    is what makes this loop safe: the cheapest path to green is to build
+    the missing thing, because the contract itself is out of reach. It
+    was inert in production until 2026-08-20 (`protect_acceptance_files`
+    was called only from a test), which is why wiring it was a
+    prerequisite for this function existing at all.
+
+    "Until green" is bounded twice, because an unbounded loop against a
+    contract nothing can satisfy would spend the entire budget proving
+    it:
+
+    * `max_rounds` caps the attempts outright; and
+    * a **progress requirement** stops early when a round leaves the
+      failure output byte-identical, which is `observe_gate_verdict`'s
+      reasoning -- a measurement that does not move while the code does
+      is not measuring the code. Here it is the stronger form: the
+      recovery loop reported it changed nothing AND the verdict is
+      unchanged, so another round has nothing new to work with.
+
+    Only the FAILING commands are retried; ones already passing are not
+    re-run between rounds, so a repair cannot be credited for them. They
+    are all re-run once at the end, because a fix for one command can
+    break another.
+    """
+    from .agent_loop import build_step_tools, run_recovery_loop
+
+    if not cmds or max_rounds <= 0 or llm_client is None:
+        return False, 0, list(failures or ())
+
+    failing = list(failures or ())
+    last_signature = None
+    rounds = 0
+
+    for attempt in range(1, max_rounds + 1):
+        detail = "\n".join(failing)[-4000:]
+        signature = detail.strip()
+        if last_signature is not None and signature == last_signature:
+            log.warning(
+                "[Acceptance] repair round %d produced a byte-identical "
+                "failure — stopping: the check is not responding to the "
+                "changes being made", attempt)
+            break
+        last_signature = signature
+        rounds = attempt
+
+        log.info("[Acceptance] repair round %d/%d — handing the failure to "
+                  "the agent loop", attempt, max_rounds)
+        tools = build_step_tools(executor, memory,
+                                 kb_context_builder=kb_context_builder,
+                                 project_root=project_root)
+        # The final round gets the stronger model, the same escalation
+        # `_run_diagnosis_loop` makes on its last attempt.
+        client = (escalation_client
+                  if (attempt == max_rounds and escalation_client is not None)
+                  else llm_client)
+        run_recovery_loop(
+            client, tools,
+            step_text=(
+                "The run's user-supplied acceptance check FAILED. It is the "
+                "one verification in this run that you did not write, and "
+                "you may read it but not edit it. Change the PROJECT until "
+                "it passes.\nCommand(s): " + "; ".join(cmds)),
+            task=task, error_info=detail, display=None, step_idx=0,
+            language=language, max_turns=max_turns,
+            verify_cmd=None, escalation_client=escalation_client)
+
+        passed, failing = (run_acceptance or run_acceptance_commands)(executor, cmds)
+        if passed:
+            log.info("[Acceptance] all command(s) passed after %d repair "
+                      "round(s)", attempt)
+            return True, attempt, []
+
+    return False, rounds, failing

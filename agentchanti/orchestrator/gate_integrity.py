@@ -185,6 +185,50 @@ def _to_cmd_dialect(cmd: str) -> str:
     return re.sub(r"\s*&\s*$", "", out).strip()
 
 
+def redundant_cd_path_variant(cmd: str) -> str | None:
+    r"""*cmd* with the `cd`-ed directory stripped from paths that repeat it.
+
+    A gate that enters a directory and then names paths already prefixed
+    with it resolves one level too deep, and no output of the step can
+    fix that. Measured 2026-08-19 run 15::
+
+        cd frontend && npm run build
+          && findstr /c:"aria-label" frontend\src\components\Navigation.jsx >nul
+          && ...
+
+    From inside `frontend/` those paths are `frontend/frontend/src/...`.
+    The step failed six times over five rewrites; `observe_gate_verdict`
+    correctly called it stalled and suppressed the escalation, but by
+    then the agent had already done what an unsatisfiable gate always
+    invites and CREATED the paths it named — `frontend/frontend/src/
+    pages/{Dashboard,ForgotPassword,Signup}Page.jsx`, all reported as
+    unplanned writes.
+
+    Offering the corrected reading as a variant means the loop tries it
+    on the first failure, under the same believe-only-if-it-passes rule
+    as the other transforms here: a dialect change, never a meaning
+    change. The planner's own `cd` is kept — it is usually right, since
+    `npm run build` needs it — and only the redundant repetition goes.
+    """
+    if not cmd:
+        return None
+    m = re.match(r"^\s*cd\s+([^\s&|;]+)\s*&&\s*(.+)$", cmd, re.DOTALL)
+    if not m:
+        return None
+    target = m.group(1).strip("\"'").replace("\\", "/").strip("./").rstrip("/")
+    if not target:
+        return None
+    rest = m.group(2)
+    # Only a path SEGMENT counts: `frontend\src` and `./frontend/src`
+    # repeat the cd, while `myfrontend/src` and a bare word do not.
+    pattern = re.compile(
+        r"(^|[\s\"'=(,])(?:\./|\.\\)?" + re.escape(target) + r"[\\/]")
+    rewritten, n = pattern.subn(r"\1", rest)
+    if not n or rewritten == rest:
+        return None
+    return cmd[:m.start(2)] + rewritten
+
+
 def platform_equivalent_variants(cmd: str) -> List[Tuple[str, str]]:
     """Other readings of *cmd* under a different shell dialect.
 
@@ -192,9 +236,14 @@ def platform_equivalent_variants(cmd: str) -> List[Tuple[str, str]]:
     the command the planner wrote and the command that ran already agree
     and there is no second reading to try.
     """
-    if not cmd or os.name != 'nt':
-        return []
     variants: List[Tuple[str, str]] = []
+    # Not platform-specific: a `cd` repeated in the paths that follow it
+    # resolves one level too deep under every shell.
+    redundant = redundant_cd_path_variant(cmd)
+    if redundant and redundant != cmd:
+        variants.append(("redundant-cd-path", redundant))
+    if not cmd or os.name != 'nt':
+        return variants
     collapsed, changed = collapse_posix_escapes(cmd)
     if changed and collapsed != cmd:
         variants.append(("posix-backslash-collapse", collapsed))

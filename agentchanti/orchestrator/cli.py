@@ -2524,7 +2524,7 @@ def _main_impl():
                 _repair_acc(
                     executor=executor, cmds=_acceptance_cmds,
                     failures=_acc_failures, llm_client=_bt_llm,
-                    memory=memory, task=task, language=lang,
+                    memory=memory, task=args.task, language=language,
                     max_rounds=getattr(cfg, "ACCEPTANCE_REPAIR_ROUNDS", 3),
                     max_turns=getattr(cfg, "AGENT_LOOP_MAX_TURNS", 8),
                     escalation_client=getattr(coder, "escalation_client",

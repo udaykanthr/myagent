@@ -74,7 +74,15 @@ def test_reading_stays_allowed(project):
 
 
 @pytest.mark.parametrize("spelling", [
-    "acceptance_check.cjs", "./acceptance_check.cjs", ".\\acceptance_check.cjs",
+    "acceptance_check.cjs", "./acceptance_check.cjs",
+    pytest.param(
+        ".\\acceptance_check.cjs",
+        marks=pytest.mark.skipif(
+            os.sep != "\\",
+            reason="on POSIX a backslash is a legal filename character, so "
+                   "'.\\x' names a DIFFERENT file rather than spelling './x' "
+                   "-- refusing it there would be the bug"),
+    ),
 ])
 def test_path_spellings_are_all_refused(project, spelling):
     tools, _ = _tools(project)
